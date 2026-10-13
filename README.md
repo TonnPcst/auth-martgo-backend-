@@ -12,6 +12,7 @@ check revocation without calling this service.
 | Method & path               | Who            |
 | --------------------------- | -------------- |
 | `POST /api/v1/auth/login`   | anyone (rate limited) |
+| `POST /api/v1/auth/login/verify`, `/resend` | anyone (rate limited), second step for users with a phone |
 | `GET /api/v1/auth/me`       | any logged-in user |
 | `POST /api/v1/auth/logout`  | any logged-in user (revokes all their tokens) |
 | `/api/v1/users` (CRUD)      | admin |
@@ -22,6 +23,25 @@ check revocation without calling this service.
 With the service running, open **http://localhost:8081/docs** for Swagger UI.
 The spec is [api/openapi.yaml](api/openapi.yaml) (served at `/docs/openapi.yaml`),
 written by hand. Check it with `make lint-api`. Set `ENABLE_DOCS=false` to hide it.
+
+## SMS login codes
+
+A user with a `phone` must confirm each login with a 6-digit code sent by SMS.
+`POST /auth/login` then answers `202` with a `challenge_id` instead of a token,
+and `POST /auth/login/verify` with the code returns the token. Users without a
+phone log in in one step as before. Admins set or remove (`""`) the phone with
+`PATCH /api/v1/users/{id}`.
+
+- Codes live in Redis (`otp:login:{challenge_id}`, hashed), expire after 5 minutes,
+  work once, and are dropped after 5 wrong tries. Wrong codes count toward the
+  login lockout. A resend is allowed after 60 seconds, at most 3 SMS per login.
+- `SMS_PROVIDER=log` (default) prints the SMS to the server log instead of sending it.
+  It is refused when `APP_ENV=production`.
+- `SMS_PROVIDER=telbiz` sends through [Telbiz](https://telbiz.la) with
+  `TELBIZ_CLIENT_ID` and `TELBIZ_SECRET`. Phones must be Lao numbers
+  (`020 xxxx xxxx` or `030 xxx xxxx`); they are stored as `20xxxxxxxx`.
+  Each correct password sends a paid SMS; when the Telbiz balance is empty,
+  logins for users with a phone fail with 500 (`CREDIT_NOT_SUFFICIENT` in the log).
 
 ## Auth contract with mart-api
 

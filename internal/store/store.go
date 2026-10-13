@@ -38,6 +38,15 @@ func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 func IsUniqueViolation(err error) bool     { return pgCode(err) == "23505" }
 func IsForeignKeyViolation(err error) bool { return pgCode(err) == "23503" }
 
+// ConstraintName tells which constraint a Postgres error violated, e.g. "users_phone_key".
+func ConstraintName(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.ConstraintName
+	}
+	return ""
+}
+
 func pgCode(err error) string {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {

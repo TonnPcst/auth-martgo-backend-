@@ -11,7 +11,7 @@ import (
 
 const bumpTokenVersion = `-- name: BumpTokenVersion :one
 UPDATE users SET token_version = token_version + 1 WHERE id = $1
-RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at
+RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone
 `
 
 func (q *Queries) BumpTokenVersion(ctx context.Context, id int64) (User, error) {
@@ -27,6 +27,7 @@ func (q *Queries) BumpTokenVersion(ctx context.Context, id int64) (User, error) 
 		&i.TokenVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Phone,
 	)
 	return i, err
 }
@@ -43,16 +44,17 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 }
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (email, password_hash, full_name, role)
-VALUES ($1, $2, $3, $4)
-RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at
+INSERT INTO users (email, password_hash, full_name, role, phone)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone
 `
 
 type CreateUserParams struct {
-	Email        string `json:"email"`
-	PasswordHash string `json:"password_hash"`
-	FullName     string `json:"full_name"`
-	Role         string `json:"role"`
+	Email        string  `json:"email"`
+	PasswordHash string  `json:"password_hash"`
+	FullName     string  `json:"full_name"`
+	Role         string  `json:"role"`
+	Phone        *string `json:"phone"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
@@ -61,6 +63,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		arg.PasswordHash,
 		arg.FullName,
 		arg.Role,
+		arg.Phone,
 	)
 	var i User
 	err := row.Scan(
@@ -73,12 +76,13 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.TokenVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Phone,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at FROM users WHERE email = $1
+SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -94,12 +98,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.TokenVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Phone,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at FROM users WHERE id = $1
+SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
@@ -115,12 +120,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.TokenVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Phone,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at FROM users
+SELECT id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone FROM users
 ORDER BY id
 LIMIT $2::int OFFSET $1::int
 `
@@ -149,6 +155,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.TokenVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Phone,
 		); err != nil {
 			return nil, err
 		}
@@ -166,12 +173,15 @@ UPDATE users SET
     role          = COALESCE($2::text, role),
     is_active     = COALESCE($3::boolean, is_active),
     password_hash = COALESCE($4::text, password_hash),
+    -- NULL keeps the phone, an empty string removes it.
+    phone         = CASE WHEN $5::text IS NULL THEN phone
+                         ELSE NULLIF($5::text, '') END,
     token_version = token_version + CASE
         WHEN $4::text IS NOT NULL
           OR $3::boolean IS FALSE THEN 1
         ELSE 0 END
-WHERE id = $5
-RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at
+WHERE id = $6
+RETURNING id, email, password_hash, full_name, role, is_active, token_version, created_at, updated_at, phone
 `
 
 type UpdateUserParams struct {
@@ -179,6 +189,7 @@ type UpdateUserParams struct {
 	Role         *string `json:"role"`
 	IsActive     *bool   `json:"is_active"`
 	PasswordHash *string `json:"password_hash"`
+	Phone        *string `json:"phone"`
 	ID           int64   `json:"id"`
 }
 
@@ -188,6 +199,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 		arg.Role,
 		arg.IsActive,
 		arg.PasswordHash,
+		arg.Phone,
 		arg.ID,
 	)
 	var i User
@@ -201,6 +213,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 		&i.TokenVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Phone,
 	)
 	return i, err
 }

@@ -62,6 +62,8 @@ func NewRouter(logger *slog.Logger, tokens *token.Manager, users mw.UserLookup, 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(mw.APIHeaders)
 		r.With(mw.RateLimit(5, time.Minute)).Post("/auth/login", authH.Login)
+		r.With(mw.RateLimit(10, time.Minute)).Post("/auth/login/verify", authH.VerifyOTP)
+		r.With(mw.RateLimit(5, time.Minute)).Post("/auth/login/resend", authH.ResendOTP)
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(tokens, users))

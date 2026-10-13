@@ -1,6 +1,6 @@
 -- name: CreateUser :one
-INSERT INTO users (email, password_hash, full_name, role)
-VALUES ($1, $2, $3, $4)
+INSERT INTO users (email, password_hash, full_name, role, phone)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: GetUserByID :one
@@ -23,6 +23,9 @@ UPDATE users SET
     role          = COALESCE(sqlc.narg('role')::text, role),
     is_active     = COALESCE(sqlc.narg('is_active')::boolean, is_active),
     password_hash = COALESCE(sqlc.narg('password_hash')::text, password_hash),
+    -- NULL keeps the phone, an empty string removes it.
+    phone         = CASE WHEN sqlc.narg('phone')::text IS NULL THEN phone
+                         ELSE NULLIF(sqlc.narg('phone')::text, '') END,
     token_version = token_version + CASE
         WHEN sqlc.narg('password_hash')::text IS NOT NULL
           OR sqlc.narg('is_active')::boolean IS FALSE THEN 1

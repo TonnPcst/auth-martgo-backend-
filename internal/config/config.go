@@ -22,6 +22,10 @@ type Config struct {
 	TrustProxy         bool
 	EnableDocs         bool
 	CORSAllowedOrigins []string
+	SMSProvider        string
+	TelbizURL          string
+	TelbizClientID     string
+	TelbizSecret       string
 }
 
 func Load() (Config, error) {
@@ -31,6 +35,10 @@ func Load() (Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6380/0"),
 		JWTPrivateKeyFile: getEnv("JWT_PRIVATE_KEY_FILE", "keys/jwt_private.pem"),
+		SMSProvider:       getEnv("SMS_PROVIDER", "log"),
+		TelbizURL:         getEnv("TELBIZ_URL", "https://api.telbiz.la"),
+		TelbizClientID:    getEnv("TELBIZ_CLIENT_ID", ""),
+		TelbizSecret:      getEnv("TELBIZ_SECRET", ""),
 	}
 
 	var errs []error
@@ -58,6 +66,18 @@ func Load() (Config, error) {
 
 	if cfg.Env == "production" && strings.Contains(cfg.DatabaseURL, "sslmode=disable") {
 		errs = append(errs, errors.New("DATABASE_URL must not use sslmode=disable in production"))
+	}
+	switch cfg.SMSProvider {
+	case "log":
+		if cfg.Env == "production" {
+			errs = append(errs, errors.New("SMS_PROVIDER=log writes login codes to the log and is not allowed in production"))
+		}
+	case "telbiz":
+		if cfg.TelbizClientID == "" || cfg.TelbizSecret == "" {
+			errs = append(errs, errors.New("TELBIZ_CLIENT_ID and TELBIZ_SECRET are required when SMS_PROVIDER=telbiz"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("SMS_PROVIDER must be log or telbiz, got %q", cfg.SMSProvider))
 	}
 
 	return cfg, errors.Join(errs...)

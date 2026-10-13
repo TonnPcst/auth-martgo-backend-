@@ -12,8 +12,10 @@ import (
 
 	"github.com/TonnPcst/martgo-auth/internal/config"
 	"github.com/TonnPcst/martgo-auth/internal/handler"
+	"github.com/TonnPcst/martgo-auth/internal/otp"
 	"github.com/TonnPcst/martgo-auth/internal/service"
 	"github.com/TonnPcst/martgo-auth/internal/session"
+	"github.com/TonnPcst/martgo-auth/internal/sms"
 	"github.com/TonnPcst/martgo-auth/internal/store"
 	"github.com/TonnPcst/martgo-auth/internal/token"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -70,10 +72,19 @@ func run() error {
 		return err
 	}
 
+	var sender otp.Sender
+	switch cfg.SMSProvider {
+	case "telbiz":
+		sender = sms.NewTelbiz(cfg.TelbizURL, cfg.TelbizClientID, cfg.TelbizSecret)
+	default:
+		sender = sms.LogSender{Logger: logger}
+	}
+	otps := otp.NewManager(rdb, sender, otp.DefaultConfig())
+
 	st := store.New(pool)
 	sessions := session.NewWriter(rdb, tokens.TTL())
 	services := handler.Services{
-		Auth:  service.NewAuthService(st, tokens, sessions),
+		Auth:  service.NewAuthService(st, tokens, sessions, otps),
 		Users: service.NewUserService(st, sessions),
 	}
 

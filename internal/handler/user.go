@@ -14,6 +14,7 @@ type UserHandler struct{ svc *service.UserService }
 type userResponse struct {
 	ID        int64     `json:"id"`
 	Email     string    `json:"email"`
+	Phone     *string   `json:"phone"`
 	FullName  string    `json:"full_name"`
 	Role      string    `json:"role"`
 	IsActive  bool      `json:"is_active"`
@@ -23,7 +24,7 @@ type userResponse struct {
 
 func toUserResponse(u db.User) userResponse {
 	return userResponse{
-		ID: u.ID, Email: u.Email, FullName: u.FullName, Role: u.Role,
+		ID: u.ID, Email: u.Email, Phone: u.Phone, FullName: u.FullName, Role: u.Role,
 		IsActive: u.IsActive, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
 	}
 }
@@ -33,6 +34,7 @@ type createUserRequest struct {
 	Password string `json:"password" validate:"required,min=8,max=72"`
 	FullName string `json:"full_name" validate:"required,max=100"`
 	Role     string `json:"role" validate:"required,oneof=admin manager cashier"`
+	Phone    string `json:"phone" validate:"omitempty,max=20"`
 }
 
 type updateUserRequest struct {
@@ -40,6 +42,8 @@ type updateUserRequest struct {
 	Role     *string `json:"role" validate:"omitempty,oneof=admin manager cashier"`
 	IsActive *bool   `json:"is_active"`
 	Password *string `json:"password" validate:"omitempty,min=8,max=72"`
+	// "" removes the phone, which turns SMS login codes off for the user.
+	Phone *string `json:"phone" validate:"omitempty,max=20"`
 }
 
 func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +53,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, err := h.svc.Create(r.Context(), service.CreateUserInput{
-		Email: req.Email, Password: req.Password, FullName: req.FullName, Role: req.Role,
+		Email: req.Email, Password: req.Password, FullName: req.FullName, Role: req.Role, Phone: req.Phone,
 	})
 	if err != nil {
 		httpx.HandleError(w, r, err)
@@ -102,7 +106,7 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, err := h.svc.Update(r.Context(), actorFrom(r), id, service.UpdateUserInput{
-		FullName: req.FullName, Role: req.Role, IsActive: req.IsActive, Password: req.Password,
+		FullName: req.FullName, Role: req.Role, IsActive: req.IsActive, Password: req.Password, Phone: req.Phone,
 	})
 	if err != nil {
 		httpx.HandleError(w, r, err)

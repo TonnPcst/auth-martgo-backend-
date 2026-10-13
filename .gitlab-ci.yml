@@ -1,0 +1,30 @@
+stages:
+  - test
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+
+cache:
+  key:
+    files: [go.sum]
+  paths:
+    - .go/pkg/mod/
+
+test:
+  stage: test
+  image: golang:1.27
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - |
+      unformatted=$(gofmt -l $(git ls-files '*.go'))
+      if [ -n "$unformatted" ]; then
+        echo "These files need gofmt:"
+        echo "$unformatted"
+        exit 1
+      fi
+    - go vet ./...
+    - go build ./...
+    - go test -race -count=1 ./...
+    - go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...

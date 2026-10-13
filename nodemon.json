@@ -1,0 +1,8 @@
+{
+  "watch": ["cmd", "internal", "api"],
+  "ext": "go,yaml",
+  "ignore": ["*_test.go"],
+  "exec": "go build -o ./tmp/martgo-auth ./cmd/api && exec ./tmp/martgo-auth",
+  "signal": "SIGTERM",
+  "delay": 500
+}

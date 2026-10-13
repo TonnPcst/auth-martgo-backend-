@@ -1,0 +1,6 @@
+.env
+tmp/
+bin/
+.DS_Store
+.go/
+keys/

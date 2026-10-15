@@ -19,6 +19,13 @@ const maxBodyBytes = 1 << 20
 
 var validate = newValidator()
 
+// newValidator creates the shared struct validator.
+//
+// ENG: Makes validation errors use the JSON field names (e.g. "full_name") instead of
+// the Go field names, so error messages match what the client sent.
+// LAO: ສ້າງ validator ທີ່ໃຊ້ຊື່ field ຕາມ JSON ໃນຂໍ້ຄວາມຂໍ້ຜິດພາດ.
+//
+// @returns the configured validator
 func newValidator() *validator.Validate {
 	v := validator.New(validator.WithRequiredStructEnabled())
 	v.RegisterTagNameFunc(func(f reflect.StructField) string {
@@ -34,6 +41,16 @@ func newValidator() *validator.Validate {
 	return v
 }
 
+// DecodeJSON decodes and validates a JSON request body into dst.
+//
+// ENG: Limits the body to 1 MB, rejects unknown fields and trailing data, then runs
+// the struct's `validate` tags. Errors are turned into readable validation messages.
+// LAO: ອ່ານ JSON ຈາກ body (ສູງສຸດ 1 MB), ຫ້າມມີ field ທີ່ບໍ່ຮູ້ຈັກ, ແລ້ວກວດສອບຕາມ validate tag.
+//
+// @param w - response writer (needed by http.MaxBytesReader)
+// @param r - incoming request
+// @param dst - pointer to the request struct to fill
+// @returns nil on success, or a validation error
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -50,6 +67,14 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	return nil
 }
 
+// decodeError turns a JSON decoding error into a client-friendly validation error.
+//
+// ENG: Handles empty body, malformed JSON, wrong field type, body too large and
+// unknown field. Anything else becomes "invalid request body".
+// LAO: ແປງຂໍ້ຜິດພາດຕອນອ່ານ JSON ໃຫ້ເປັນຂໍ້ຄວາມທີ່ client ເຂົ້າໃຈງ່າຍ.
+//
+// @param err - error from json.Decoder
+// @returns a validation error
 func decodeError(err error) error {
 	var syntaxErr *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
@@ -70,6 +95,13 @@ func decodeError(err error) error {
 	return apperr.Validation("invalid request body")
 }
 
+// validationError joins all field validation failures into one validation error.
+//
+// ENG: Messages are separated by "; ", e.g. "name is required; price must be greater than 0".
+// LAO: ລວມຂໍ້ຜິດພາດການກວດສອບທຸກ field ເປັນຂໍ້ຄວາມດຽວ.
+//
+// @param err - error from validator.Struct
+// @returns a validation error
 func validationError(err error) error {
 	var verrs validator.ValidationErrors
 	if !errors.As(err, &verrs) {
@@ -82,6 +114,14 @@ func validationError(err error) error {
 	return apperr.Validation("%s", strings.Join(msgs, "; "))
 }
 
+// fieldMessage builds a readable message for one failed validation rule.
+//
+// ENG: Supports required, email, oneof, min, max, gt, gte and lte. The top-level struct
+// name is removed so nested fields read like "items[0].quantity".
+// LAO: ສ້າງຂໍ້ຄວາມອະທິບາຍສຳລັບ field ທີ່ບໍ່ຜ່ານການກວດສອບ.
+//
+// @param fe - the failed field
+// @returns the message, e.g. "price must be greater than 0"
 func fieldMessage(fe validator.FieldError) string {
 	field := fe.Namespace()
 	if i := strings.IndexByte(field, '.'); i >= 0 {
@@ -116,6 +156,14 @@ func fieldMessage(fe validator.FieldError) string {
 	return field + " is invalid"
 }
 
+// IDParam reads a positive integer ID from a chi URL parameter.
+//
+// ENG: Used for routes like /products/{id}.
+// LAO: ອ່ານ ID (ຈຳນວນເຕັມບວກ) ຈາກ URL path.
+//
+// @param r - incoming request
+// @param name - URL parameter name, usually "id"
+// @returns the ID, or a validation error if it is missing, not a number or <= 0
 func IDParam(r *http.Request, name string) (int64, error) {
 	id, err := strconv.ParseInt(chi.URLParam(r, name), 10, 64)
 	if err != nil || id <= 0 {
@@ -124,6 +172,14 @@ func IDParam(r *http.Request, name string) (int64, error) {
 	return id, nil
 }
 
+// QueryString reads an optional string query parameter.
+//
+// ENG: The value is trimmed. Returns nil when the parameter is missing or blank.
+// LAO: ອ່ານ query string (ບໍ່ບັງຄັບ) — ຖ້າວ່າງຈະສົ່ງຄືນ nil.
+//
+// @param r - incoming request
+// @param key - query parameter name
+// @returns pointer to the value, or nil
 func QueryString(r *http.Request, key string) *string {
 	v := strings.TrimSpace(r.URL.Query().Get(key))
 	if v == "" {
@@ -132,6 +188,14 @@ func QueryString(r *http.Request, key string) *string {
 	return &v
 }
 
+// QueryInt64 reads an optional int64 query parameter.
+//
+// ENG: Returns nil when the parameter is missing.
+// LAO: ອ່ານ query ແບບຈຳນວນເຕັມ (ບໍ່ບັງຄັບ) — ຖ້າບໍ່ມີຈະສົ່ງຄືນ nil.
+//
+// @param r - incoming request
+// @param key - query parameter name
+// @returns pointer to the value, nil, or a validation error if it is not an integer
 func QueryInt64(r *http.Request, key string) (*int64, error) {
 	raw := r.URL.Query().Get(key)
 	if raw == "" {
@@ -144,6 +208,14 @@ func QueryInt64(r *http.Request, key string) (*int64, error) {
 	return &v, nil
 }
 
+// QueryBool reads an optional boolean query parameter.
+//
+// ENG: Returns nil when the parameter is missing.
+// LAO: ອ່ານ query ແບບ true/false (ບໍ່ບັງຄັບ) — ຖ້າບໍ່ມີຈະສົ່ງຄືນ nil.
+//
+// @param r - incoming request
+// @param key - query parameter name
+// @returns pointer to the value, nil, or a validation error if it is not a boolean
 func QueryBool(r *http.Request, key string) (*bool, error) {
 	raw := r.URL.Query().Get(key)
 	if raw == "" {
@@ -156,6 +228,15 @@ func QueryBool(r *http.Request, key string) (*bool, error) {
 	return &v, nil
 }
 
+// queryInt32 reads an int32 query parameter with a default.
+//
+// ENG: Used by ParsePagination for limit and offset.
+// LAO: ອ່ານ query ແບບ int32 — ຖ້າບໍ່ມີຈະໃຊ້ຄ່າເລີ່ມຕົ້ນ.
+//
+// @param r - incoming request
+// @param key - query parameter name
+// @param fallback - value used when the parameter is missing
+// @returns the value, or a validation error if it is not an integer
 func queryInt32(r *http.Request, key string, fallback int32) (int32, error) {
 	raw := r.URL.Query().Get(key)
 	if raw == "" {

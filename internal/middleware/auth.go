@@ -15,6 +15,17 @@ type UserLookup interface {
 	GetUserByID(ctx context.Context, id int64) (db.User, error)
 }
 
+// Authenticate requires a valid Bearer token for an active user.
+//
+// ENG: Verifies the JWT, then loads the user from the database to check that the
+// account still exists and is active and that the token version matches (so logout
+// and role changes take effect right away). The role from the database replaces the
+// one in the token.
+// LAO: ກວດ Bearer token ແລະ ຂໍ້ມູນຜູ້ໃຊ້ໃນ DB — ບັນຊີຕ້ອງ active ແລະ ເວີຊັນ token ຕ້ອງກົງກັນ.
+//
+// @param tokens - verifies the JWT signature and expiry
+// @param users - loads the user by ID
+// @returns the middleware; it answers 401 for any auth failure
 func Authenticate(tokens *token.Manager, users UserLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +65,14 @@ func Authenticate(tokens *token.Manager, users UserLookup) func(http.Handler) ht
 	}
 }
 
+// RequireRole only lets users with one of the given roles through.
+//
+// ENG: Must run after Authenticate. Returns 401 if no claims are in the context and
+// 403 if the user's role is not in the allowed list.
+// LAO: ອະນຸຍາດສະເພາະຜູ້ໃຊ້ທີ່ມີ role ຕາມທີ່ກຳນົດ — ບໍ່ມີສິດຈະຕອບ 403.
+//
+// @param roles - roles that are allowed
+// @returns the middleware
 func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	allowed := make(map[string]bool, len(roles))
 	for _, role := range roles {

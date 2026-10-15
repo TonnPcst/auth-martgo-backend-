@@ -67,11 +67,26 @@ const swaggerUIPage = `<!doctype html>
 </body>
 </html>`
 
+// swaggerUI serves the Swagger UI page. GET /docs
+//
+// ENG: Returns the static HTML page that loads Swagger UI from the CDN and points it
+// at /docs/openapi.yaml. Only registered when docs are enabled.
+// LAO: ສົ່ງໜ້າ HTML ຂອງ Swagger UI ສຳລັບເບິ່ງເອກະສານ API.
+//
+// @param w - response writer
+// @returns writes 200 with the HTML page
 func swaggerUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(swaggerUIPage))
 }
 
+// openAPISpec serves the embedded OpenAPI spec. GET /docs/openapi.yaml
+//
+// ENG: Writes the api/openapi.yaml file that is embedded in the binary.
+// LAO: ສົ່ງໄຟລ໌ OpenAPI spec (YAML) ທີ່ embed ໄວ້ໃນ binary.
+//
+// @param w - response writer
+// @returns writes 200 with the YAML spec
 func openAPISpec(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	_, _ = w.Write(api.OpenAPISpec)

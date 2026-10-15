@@ -40,7 +40,7 @@ func newTestRouter(t *testing.T, users fakeUsers, pinger Pinger) (http.Handler, 
 	require.NoError(t, err)
 	tokens := token.NewManagerFromKey(priv, time.Hour)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewRouter(logger, tokens, users, pinger, Services{}, RouterOptions{}), tokens
+	return NewRouter(logger, tokens, users, []HealthCheck{{Name: "database", Pinger: pinger}}, Services{}, RouterOptions{}), tokens
 }
 
 func send(h http.Handler, method, path, token string) *httptest.ResponseRecorder {
@@ -66,6 +66,21 @@ func TestHealthz(t *testing.T) {
 
 	h, _ = newTestRouter(t, nil, fakePinger{err: errors.New("db down")})
 	assert.Equal(t, http.StatusServiceUnavailable, send(h, http.MethodGet, "/healthz", "").Code)
+}
+
+func TestHealthzReportsRedisDown(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	checks := []HealthCheck{
+		{Name: "database", Pinger: fakePinger{}},
+		{Name: "redis", Pinger: PingFunc(func(context.Context) error { return errors.New("connection refused") })},
+	}
+	h := NewRouter(logger, token.NewManagerFromKey(priv, time.Hour), fakeUsers{}, checks, Services{}, RouterOptions{})
+
+	rec := send(h, http.MethodGet, "/healthz", "")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "redis unavailable")
 }
 
 func TestAuthenticate(t *testing.T) {
@@ -126,7 +141,7 @@ func TestDocs(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := NewRouter(logger, token.NewManagerFromKey(priv, time.Hour), fakeUsers{}, fakePinger{}, Services{}, RouterOptions{EnableDocs: true})
+	h := NewRouter(logger, token.NewManagerFromKey(priv, time.Hour), fakeUsers{}, nil, Services{}, RouterOptions{EnableDocs: true})
 
 	assert.Equal(t, http.StatusOK, send(h, http.MethodGet, "/docs", "").Code)
 	rec := send(h, http.MethodGet, "/docs/openapi.yaml", "")

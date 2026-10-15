@@ -15,6 +15,16 @@ type window struct {
 	resetAt time.Time
 }
 
+// RateLimit limits each client IP to a number of requests per time window.
+//
+// ENG: Uses a fixed window kept in memory, so the count is per instance and resets
+// on restart. Expired windows are swept at most once per window. When over the limit
+// it returns 429 with a Retry-After header.
+// LAO: ຈຳກັດຈຳນວນ request ຕໍ່ IP ໃນຊ່ວງເວລາທີ່ກຳນົດ — ເກີນຈະຕອບ 429.
+//
+// @param limit - max requests allowed per window
+// @param every - window length
+// @returns the middleware
 func RateLimit(limit int, every time.Duration) func(http.Handler) http.Handler {
 	var (
 		mu        sync.Mutex
@@ -54,6 +64,14 @@ func RateLimit(limit int, every time.Duration) func(http.Handler) http.Handler {
 	}
 }
 
+// clientIP returns the client IP from r.RemoteAddr without the port.
+//
+// ENG: When TRUST_PROXY is on, chi's RealIP middleware has already replaced RemoteAddr
+// with the forwarded IP.
+// LAO: ດຶງ IP ຂອງ client ຈາກ RemoteAddr (ຕັດ port ອອກ).
+//
+// @param r - incoming request
+// @returns the IP, or the raw RemoteAddr if it cannot be split
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

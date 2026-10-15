@@ -22,6 +22,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// main is the entry point of the auth API server.
+//
+// ENG: Calls run and exits with code 1 if it returns an error.
+// LAO: ຈຸດເລີ່ມຕົ້ນຂອງ auth server — ຖ້າ run ຜິດພາດຈະອອກດ້ວຍ code 1.
 func main() {
 	if err := run(); err != nil {
 		slog.Error("server exited with error", "err", err)
@@ -29,6 +33,16 @@ func main() {
 	}
 }
 
+// run wires up all dependencies and serves HTTP until a shutdown signal arrives.
+//
+// ENG: Loads config, sets up the JSON logger, connects to Postgres and Redis (5-second
+// ping timeout), loads the Ed25519 private key used to sign tokens, picks the SMS
+// sender (Telbiz, or the log sender for local dev), builds the OTP manager, session
+// writer, services and router, then starts the server. On SIGINT/SIGTERM it shuts
+// down gracefully within SHUTDOWN_TIMEOUT.
+// LAO: ເຊື່ອມຕໍ່ DB, Redis, ໂຫຼດ private key, ເລືອກຜູ້ສົ່ງ SMS, ສ້າງ router ແລ້ວເປີດ server.
+//
+// @returns error if startup fails, the server crashes or shutdown times out
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -88,7 +102,11 @@ func run() error {
 		Users: service.NewUserService(st, sessions),
 	}
 
-	router := handler.NewRouter(logger, tokens, st, pool, services, handler.RouterOptions{
+	checks := []handler.HealthCheck{
+		{Name: "database", Pinger: pool},
+		{Name: "redis", Pinger: handler.PingFunc(func(ctx context.Context) error { return rdb.Ping(ctx).Err() })},
+	}
+	router := handler.NewRouter(logger, tokens, st, checks, services, handler.RouterOptions{
 		TrustProxy:         cfg.TrustProxy,
 		EnableDocs:         cfg.EnableDocs,
 		CORSAllowedOrigins: cfg.CORSAllowedOrigins,

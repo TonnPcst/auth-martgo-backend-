@@ -70,7 +70,22 @@ make migrate           # create users + seed the admin
 make run               # http://localhost:8081
 ```
 
-Other targets: `make dev`, `make test`, `make sqlc`, `make lint-api`, `make migrate-status`, `make help`.
+Other targets: `make dev`, `make test`, `make sqlc`, `make sqlc-check`, `make lint-api`,
+`make migrate-status`, `make docker-build`, `make help`. CI runs `make sqlc-check` and
+`make lint-api` alongside the tests, so run them before pushing.
+
+### Docker
+
+The `Dockerfile` builds a distroless image (non-root) with two binaries: `/app/api`
+(the default entrypoint) and `/app/migrate` (migrations + admin seed). Keys and
+config are not baked in: mount the private key at `/app/keys/jwt_private.pem` and
+pass settings as environment variables. To run both services in containers, use
+`make up-app` in mart-api (see its README).
+
+On a Linux host the container user (uid 65532) must be able to read the mounted
+key, so give it read access (e.g. `chgrp 65532 keys/jwt_private.pem && chmod 640 keys/jwt_private.pem`).
+
+`GET /healthz` returns `503` when Postgres **or** Redis is unreachable.
 
 ## Known gaps
 

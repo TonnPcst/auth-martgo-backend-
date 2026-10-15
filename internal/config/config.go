@@ -28,6 +28,16 @@ type Config struct {
 	TelbizSecret       string
 }
 
+// Load reads the service configuration from environment variables.
+//
+// ENG: Applies defaults (HTTP_ADDR=:8081, JWT_TTL=24h, SMS_PROVIDER=log, ...) and
+// collects every problem instead of stopping at the first one. DATABASE_URL is
+// required and must not use sslmode=disable in production. SMS_PROVIDER must be
+// "log" or "telbiz": "log" is refused in production because it writes login codes
+// to the log, and "telbiz" needs TELBIZ_CLIENT_ID and TELBIZ_SECRET.
+// LAO: ອ່ານການຕັ້ງຄ່າຈາກ env ພ້ອມຄ່າເລີ່ມຕົ້ນ ແລະ ກວດສອບ (ລວມທັງຜູ້ໃຫ້ບໍລິການ SMS).
+//
+// @returns the config, and a joined error listing every invalid setting
 func Load() (Config, error) {
 	cfg := Config{
 		Env:               getEnv("APP_ENV", "development"),
@@ -83,7 +93,14 @@ func Load() (Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
-// getEnv trims whitespace because make keeps trailing spaces from .env lines.
+// getEnv reads an environment variable, falling back to a default when it is empty.
+//
+// ENG: The value is trimmed because make keeps trailing spaces from .env lines.
+// LAO: ອ່ານຕົວແປ env (ຕັດຍະຫວ່າງອອກ) — ຖ້າວ່າງຈະໃຊ້ຄ່າເລີ່ມຕົ້ນ.
+//
+// @param key - environment variable name
+// @param fallback - value used when the variable is unset or blank
+// @returns the trimmed value or the fallback
 func getEnv(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -91,6 +108,15 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// getBool reads a boolean environment variable.
+//
+// ENG: Accepts anything strconv.ParseBool accepts (true/false, 1/0, ...).
+// Returns the fallback when the variable is unset or blank.
+// LAO: ອ່ານຕົວແປ env ແບບ true/false — ຖ້າວ່າງຈະໃຊ້ຄ່າເລີ່ມຕົ້ນ.
+//
+// @param key - environment variable name
+// @param fallback - value used when the variable is unset or blank
+// @returns the parsed bool, or an error if the value is not a valid boolean
 func getBool(key string, fallback bool) (bool, error) {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
@@ -103,6 +129,13 @@ func getBool(key string, fallback bool) (bool, error) {
 	return b, nil
 }
 
+// splitList splits a comma-separated string into a list.
+//
+// ENG: Trims each item and drops empty ones, so "a, ,b," gives ["a", "b"].
+// LAO: ແຍກສະຕຣິງທີ່ຂັ້ນດ້ວຍ comma ເປັນລາຍການ ແລະ ຕັດລາຍການທີ່ວ່າງອອກ.
+//
+// @param s - comma-separated values
+// @returns the non-empty, trimmed items (nil when there are none)
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

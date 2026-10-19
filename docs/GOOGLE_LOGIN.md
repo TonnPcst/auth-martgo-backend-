@@ -35,8 +35,10 @@ sequenceDiagram
     participant G as Google
     participant F as Frontend
 
-    U->>A: GET /auth/google/login
-    A->>R: SET oauth:state:{state} = verifier:nonce (10 min)
+    F->>F: verifier = random, keep in sessionStorage
+    F->>U: link with code_challenge = SHA-256(verifier)
+    U->>A: GET /auth/google/login?code_challenge
+    A->>R: SET oauth:state:{state} = pkce verifier:nonce:code_challenge (10 min)
     A-->>U: 302 to Google + Set-Cookie martgo_oauth_state={state}
     U->>G: sign in, pick account
     G-->>U: 302 to /auth/google/callback?state&code
@@ -47,20 +49,25 @@ sequenceDiagram
     G-->>A: id_token (JWT signed by Google)
     A->>A: verify signature, iss, aud, exp, nonce, (hd)
     A->>A: find or link user (user_identities), check active
-    A->>R: SET oauth:handoff:{code} = user_id (60 s)
+    A->>R: SET oauth:handoff:{code} = user_id:code_challenge (60 s)
     A-->>U: 302 to OAUTH_FRONTEND_URL?code={code}
     U->>F: page loads with ?code
-    F->>A: POST /auth/google/exchange {code}
+    F->>A: POST /auth/google/exchange {code, code_verifier}
     A->>R: GETDEL oauth:handoff:{code}
+    A->>A: SHA-256(code_verifier) == code_challenge?
     A-->>F: 200 access_token, or 202 SMS challenge
 ```
 
 In words:
 
+0. **Frontend.** Before sending the browser to martgo-auth, the frontend creates a
+   random `code_verifier`, keeps it in `sessionStorage` and puts its SHA-256 in the
+   link as `?code_challenge=`. The challenge is required.
 1. **Start.** `GET /auth/google/login` creates three random values. The **state**
    goes to Google and into an HttpOnly cookie. The **PKCE verifier** stays in Redis
    and only its SHA-256 hash goes to Google. The **nonce** goes to Google and comes
-   back inside the ID token. The browser is redirected to Google.
+   back inside the ID token. The frontend's `code_challenge` is kept with them. The
+   browser is redirected to Google.
 2. **Google.** The user signs in and picks an account. Google redirects the browser
    back to `/auth/google/callback?state=...&code=...`.
 3. **Callback.** martgo-auth checks that the `state` in the URL equals the cookie,
@@ -71,8 +78,11 @@ In words:
    The first time, it is linked to the user with the same **verified** email.
    Disabled or unknown users are refused.
 5. **Hand off.** Instead of putting the JWT in a URL, martgo-auth stores a one-time
-   code in Redis for 60 seconds and redirects to `OAUTH_FRONTEND_URL?code=...`.
-6. **Exchange.** The frontend posts the code to `/auth/google/exchange`. The user is
+   code in Redis for 60 seconds, bound to the frontend's `code_challenge`, and
+   redirects to `OAUTH_FRONTEND_URL?code=...`.
+6. **Exchange.** The frontend posts the code and its `code_verifier` to
+   `/auth/google/exchange`. The SHA-256 of the verifier must equal the stored
+   challenge, so only the browser that started the login can use the code. The user is
    reloaded (they may have been disabled meanwhile). Then the login finishes exactly
    like a password login: `202` with an SMS challenge if the user has a phone
    (finish with `POST /auth/login/verify`), otherwise `200` with the access token.
@@ -82,11 +92,11 @@ In words:
 All under `/api/v1`, public, rate limited to 10 requests per minute per IP each.
 They exist only when `GOOGLE_CLIENT_ID` is set.
 
-| Endpoint                     | Called by                                      | Result                                                             |
-| ---------------------------- | ---------------------------------------------- | ------------------------------------------------------------------ |
-| `GET /auth/google/login`     | the browser (a link or button on the frontend) | `302` to Google, sets `martgo_oauth_state` cookie                  |
-| `GET /auth/google/callback`  | Google, through the browser                    | `302` to `OAUTH_FRONTEND_URL?code=...` or `?error=...`             |
-| `POST /auth/google/exchange` | frontend JavaScript, body `{"code": "..."}`    | `200` like `/auth/login`, `202` SMS challenge, `400`, `401`, `429` |
+| Endpoint                                    | Called by                                                           | Result                                                                                    |
+| ------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `GET /auth/google/login?code_challenge=...` | the browser (a link or button on the frontend)                      | `302` to Google, sets `martgo_oauth_state` cookie; `400` without a valid `code_challenge` |
+| `GET /auth/google/callback`                 | Google, through the browser                                         | `302` to `OAUTH_FRONTEND_URL?code=...` or `?error=...`                                    |
+| `POST /auth/google/exchange`                | frontend JavaScript, body `{"code": "...", "code_verifier": "..."}` | `200` like `/auth/login`, `202` SMS challenge, `400`, `401`, `429`                        |
 
 Error reasons on the frontend redirect (`?error=`):
 
@@ -98,7 +108,8 @@ Error reasons on the frontend redirect (`?error=`):
 | `failed`        | Anything unexpected (Google exchange error, Redis down...). The details are logged as `google login failed` with the request ID                 |
 
 `/auth/google/exchange` errors: `401 login link expired, please sign in again` (unknown,
-used or expired code) and `401 this Google account cannot sign in to MartGo` (user
+used or expired code, or a `code_verifier` that does not match; a wrong verifier also
+uses the code up) and `401 this Google account cannot sign in to MartGo` (user
 deleted or disabled since the redirect).
 
 ## Who may log in
@@ -121,23 +132,25 @@ email address cannot take over the martgo user.
 
 ## Security measures
 
-| Measure                                                       | Where                          | Stops                                                        |
-| ------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------ |
-| `state` in Redis, single use (`GETDEL`), 10 min               | `oauth.Google.Start/Finish`    | forged or replayed callbacks                                 |
-| `state` also in an HttpOnly, SameSite=Lax cookie              | `GoogleHandler.Login/Callback` | login CSRF (a victim finishing a login the attacker started) |
-| PKCE (S256)                                                   | `oauth.Google`                 | a stolen authorization code being redeemed                   |
-| `nonce` checked in the ID token                               | `oauth.Google.Finish`          | replay of an old ID token                                    |
-| ID token verified (signature, `iss`, `aud`, `exp`) by go-oidc | `oauth.Google.Finish`          | forged ID tokens                                             |
-| `hd` claim checked when `GOOGLE_ALLOWED_DOMAIN` is set        | `oauth.Google.Finish`          | accounts outside the company Workspace                       |
-| `email_verified` required to link                             | `AuthService.linkIdentity`     | account takeover with an unverified email                    |
-| No automatic sign-up                                          | `AuthService.linkIdentity`     | any Gmail user getting into the store system                 |
-| One Google account per user (`UNIQUE (user_id, provider)`)    | migration `00004`              | relinking a user to a different Google account               |
-| One-time handoff code (60 s) instead of a JWT in the URL      | `oauth.Handoffs`               | tokens leaking into browser history, proxy logs, `Referer`   |
-| User reloaded and `is_active` checked at exchange             | `AuthService.ExchangeHandoff`  | logging in right after being disabled                        |
-| SMS OTP still required for users with a phone                 | `AuthService.complete`         | a stolen Google account being enough                         |
-| Fixed `OAUTH_FRONTEND_URL` from config                        | `GoogleHandler.redirect`       | open redirect                                                |
-| https required for both URLs in production                    | `config.Load`                  | codes and cookies sent in clear text                         |
-| Secure cookie in production                                   | `RouterOptions.SecureCookies`  | cookie sent over http                                        |
+| Measure                                                       | Where                          | Stops                                                                                     |
+| ------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `state` in Redis, single use (`GETDEL`), 10 min               | `oauth.Google.Start/Finish`    | forged or replayed callbacks                                                              |
+| `state` also in an HttpOnly, SameSite=Lax cookie              | `GoogleHandler.Login/Callback` | login CSRF (a victim finishing a login the attacker started)                              |
+| PKCE (S256)                                                   | `oauth.Google`                 | a stolen authorization code being redeemed                                                |
+| `nonce` checked in the ID token                               | `oauth.Google.Finish`          | replay of an old ID token                                                                 |
+| ID token verified (signature, `iss`, `aud`, `exp`) by go-oidc | `oauth.Google.Finish`          | forged ID tokens                                                                          |
+| `hd` claim checked when `GOOGLE_ALLOWED_DOMAIN` is set        | `oauth.Google.Finish`          | accounts outside the company Workspace                                                    |
+| `email_verified` required to link                             | `AuthService.linkIdentity`     | account takeover with an unverified email                                                 |
+| No automatic sign-up                                          | `AuthService.linkIdentity`     | any Gmail user getting into the store system                                              |
+| One Google account per user (`UNIQUE (user_id, provider)`)    | migration `00004`              | relinking a user to a different Google account                                            |
+| One-time handoff code (60 s) instead of a JWT in the URL      | `oauth.Handoffs`               | tokens leaking into browser history, proxy logs, `Referer`                                |
+| Handoff code bound to the frontend's `code_challenge` (PKCE)  | `oauth.Handoffs.Redeem`        | handoff code fixation: an attacker sending the victim a link with the attacker's own code |
+| Wrong `code_verifier` uses the code up; constant-time compare | `oauth.Handoffs.Redeem`        | guessing the verifier, timing attacks                                                     |
+| User reloaded and `is_active` checked at exchange             | `AuthService.ExchangeHandoff`  | logging in right after being disabled                                                     |
+| SMS OTP still required for users with a phone                 | `AuthService.complete`         | a stolen Google account being enough                                                      |
+| Fixed `OAUTH_FRONTEND_URL` from config                        | `GoogleHandler.redirect`       | open redirect                                                                             |
+| https required for both URLs in production                    | `config.Load`                  | codes and cookies sent in clear text                                                      |
+| Secure cookie in production                                   | `RouterOptions.SecureCookies`  | cookie sent over http                                                                     |
 
 ## Data
 
@@ -160,10 +173,10 @@ DELETE FROM user_identities WHERE user_id = 8 AND provider = 'google';
 
 **Redis**
 
-| Key                    | Value                     | TTL                         |
-| ---------------------- | ------------------------- | --------------------------- |
-| `oauth:state:{state}`  | `{pkce verifier}:{nonce}` | 10 min, deleted on callback |
-| `oauth:handoff:{code}` | user ID                   | 60 s, deleted on exchange   |
+| Key                    | Value                                      | TTL                         |
+| ---------------------- | ------------------------------------------ | --------------------------- |
+| `oauth:state:{state}`  | `{pkce verifier}:{nonce}:{code_challenge}` | 10 min, deleted on callback |
+| `oauth:handoff:{code}` | `{user ID}:{code_challenge}`               | 60 s, deleted on exchange   |
 
 ## Configuration
 
@@ -233,11 +246,12 @@ Swagger's **Try it out** cannot be used for `/auth/google/login`: it calls the A
 with `fetch`, which cannot follow a redirect to Google ("Failed to fetch").
 
 1. Open <http://localhost:8081/docs>.
-2. Cmd-click the `/api/v1/auth/google/login` link in that endpoint's description
-   (opens a new tab), sign in with Google.
+2. Cmd-click the `/api/v1/auth/google/login?code_challenge=...` link in that
+   endpoint's description (opens a new tab), sign in with Google. The link uses the
+   example pair from RFC 7636, which is public: use it only for local testing.
 3. You land on `/docs?code=XXXX`. Copy the code.
-4. Within 60 seconds: `POST /auth/google/exchange` → Try it out → `{"code": "XXXX"}`
-   → `200` with `access_token`.
+4. Within 60 seconds: `POST /auth/google/exchange` → Try it out →
+   `{"code": "XXXX", "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"}` → `200` with `access_token`.
 5. **Authorize** with that token (log out the admin token first), then
    `GET /auth/me` returns the Google user.
 6. Check the link: `SELECT * FROM user_identities;` shows one `google` row.
@@ -266,20 +280,22 @@ LOG=/tmp/martgo-auth.log USER_ID=8 bash google_login_e2e.sh   # terminal 2
 It changes the test user (sets and removes a phone, disables and re-enables it,
 logs it out, which revokes that user's existing tokens) and leaves it as it was.
 It takes about 70 seconds because it waits for the exchange rate limit to reset.
+The Google step is played with the RFC 7636 example verifier/challenge pair.
 
-Last run (2026-10-16, user 8): **43 passed, 0 failed.**
+Last run (2026-10-19, user 8): **51 passed, 0 failed.**
 
-| Group                      | Checks                                                                                                                                                                                                                     |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. `/auth/google/login`    | `302` to `accounts.google.com`, `code_challenge_method=S256`, `nonce`, scopes `openid email profile`, URL state = cookie, cookie `HttpOnly` / `SameSite=Lax` / `Path=/api/v1/auth/google`, state in Redis with TTL ≤ 600 s |
-| 2. `/auth/google/callback` | cancel → `access_denied`; no cookie, wrong cookie, unknown state → `invalid_state`; cookie cleared; bad code → `failed` and logged; state deleted after use; reusing it → `invalid_state`                                  |
-| 3. exchange validation     | empty body, `{}`, 65-character code → `400`; unknown code → `401`                                                                                                                                                          |
-| 4. exchange success        | `200` Bearer token; replay → `401`; `/auth/me` works; logout `204` then the token → `401`                                                                                                                                  |
-| 5. expiry                  | handoff older than its TTL → `401`                                                                                                                                                                                         |
-| 6. regression              | password login still returns `access_token`                                                                                                                                                                                |
-| 7. SMS 2FA                 | user with phone → `202` with `******1234`; code from log → `/auth/login/verify` `200`                                                                                                                                      |
-| 8. disabled user           | disabled between callback and exchange → `401 ... cannot sign in`                                                                                                                                                          |
-| 9. rate limit              | 11th exchange within a minute → `429`                                                                                                                                                                                      |
+| Group                      | Checks                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. `/auth/google/login`    | no or short `code_challenge` → `400`; `302` to `accounts.google.com`, `code_challenge_method=S256` with our own challenge (the frontend's is not sent to Google), `nonce`, scopes `openid email profile`, URL state = cookie, cookie `HttpOnly` / `SameSite=Lax` / `Path=/api/v1/auth/google`, state in Redis with TTL ≤ 600 s and the frontend's challenge kept with it |
+| 2. `/auth/google/callback` | cancel → `access_denied`; no cookie, wrong cookie, unknown state → `invalid_state`; cookie cleared; bad code → `failed` and logged; state deleted after use; reusing it → `invalid_state`                                                                                                                                                                                |
+| 3. exchange validation     | empty body, missing `code`, missing `code_verifier`, 65-character code → `400`; unknown code → `401`                                                                                                                                                                                                                                                                     |
+| 4. exchange success        | `200` Bearer token; replay → `401`; `/auth/me` works; logout `204` then the token → `401`                                                                                                                                                                                                                                                                                |
+| 5. expiry                  | handoff older than its TTL → `401`                                                                                                                                                                                                                                                                                                                                       |
+| 6. browser binding         | another browser's `code_verifier` → `401` with the same message as an expired code; the code is then used up                                                                                                                                                                                                                                                             |
+| 7. regression              | password login still returns `access_token`                                                                                                                                                                                                                                                                                                                              |
+| 8. SMS 2FA                 | user with phone → `202` with `******1234`; code from log → `/auth/login/verify` `200`                                                                                                                                                                                                                                                                                    |
+| 9. disabled user           | disabled between callback and exchange → `401 ... cannot sign in`                                                                                                                                                                                                                                                                                                        |
+| 10. rate limit             | 11th exchange within a minute → `429`                                                                                                                                                                                                                                                                                                                                    |
 
 <details>
 <summary><code>google_login_e2e.sh</code></summary>
@@ -296,6 +312,10 @@ USER_ID=${USER_ID:-8}
 ADMIN_EMAIL=${ADMIN_EMAIL:-admin@martgo.local}
 ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin12345}
 R="redis-cli -p 6380"
+# RFC 7636 example pair: C = base64url(SHA-256(V)). Fine for tests, never in a frontend.
+V=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
+C=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+OTHER_V=$(printf 'x%.0s' {1..43})
 pass=0; fail=0
 check() { # name, expected substring, actual
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; pass=$((pass+1)); else echo "FAIL  $1  (want '$2', got '$3')"; fail=$((fail+1)); fi
@@ -303,16 +323,21 @@ check() { # name, expected substring, actual
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 location() { curl -s -o /dev/null -w '%{redirect_url}' "$@"; }
 exchange() { curl -s -w '\n%{http_code}' "$API/auth/google/exchange" -H 'Content-Type: application/json' -d "$1"; }
-handoff() { local c="TEST$RANDOM$RANDOM"; $R SET "oauth:handoff:$c" "$USER_ID" EX "${1:-60}" >/dev/null; echo "$c"; }
+body() { echo "{\"code\":\"$1\",\"code_verifier\":\"${2:-$V}\"}"; }
+# handoff [ttl] stores a code the way the callback does: "<user id>:<code_challenge>".
+handoff() { local c="TEST$RANDOM$RANDOM"; $R SET "oauth:handoff:$c" "$USER_ID:$C" EX "${1:-60}" >/dev/null; echo "$c"; }
 
 echo "== 1. /auth/google/login"
-hdr=$(curl -s -D - -o /dev/null "$API/auth/google/login")
+check "no code_challenge -> 400"        "400" "$(status "$API/auth/google/login")"
+check "short code_challenge -> 400"     "400" "$(status "$API/auth/google/login?code_challenge=abc")"
+hdr=$(curl -s -D - -o /dev/null "$API/auth/google/login?code_challenge=$C")
 loc=$(grep -i '^location:' <<<"$hdr" | tr -d '\r')
 cookie=$(grep -i '^set-cookie: martgo_oauth_state=' <<<"$hdr" | tr -d '\r')
 state=$(sed -E 's/.*martgo_oauth_state=([^;]*).*/\1/' <<<"$cookie")
 check "302 status"                      "302" "$(head -1 <<<"$hdr")"
 check "redirects to Google"             "https://accounts.google.com/o/oauth2/auth" "$loc"
 check "PKCE challenge S256"             "code_challenge_method=S256" "$loc"
+check "Google gets our own challenge, not the frontend's" "true" "$([[ "$loc" != *"$C"* ]] && echo true || echo leaked)"
 check "sends nonce"                     "nonce=" "$loc"
 check "scopes openid email profile"     "scope=openid+email+profile" "$loc"
 check "state in URL = cookie"           "state=$state" "$loc"
@@ -321,6 +346,7 @@ check "cookie SameSite=Lax"             "SameSite=Lax" "$cookie"
 check "cookie path"                     "Path=/api/v1/auth/google" "$cookie"
 ttl=$($R TTL "oauth:state:$state")
 check "state stored in Redis (TTL>0)"   "true" "$([[ $ttl -gt 0 && $ttl -le 600 ]] && echo true || echo "ttl=$ttl")"
+check "frontend challenge kept with state" ":$C" "$($R GET "oauth:state:$state")"
 
 echo "== 2. /auth/google/callback"
 check "user cancelled -> access_denied" "?error=access_denied" "$(location "$API/auth/google/callback?error=access_denied")"
@@ -334,20 +360,21 @@ check "failure logged"                  "google login failed" "$(grep 'google lo
 check "same state again -> invalid_state" "?error=invalid_state" "$(location -b "martgo_oauth_state=$state" "$API/auth/google/callback?state=$state&code=bogus")"
 
 echo "== 3. /auth/google/exchange validation"
-check "empty body -> 400"   "400" "$(exchange '' | tail -1)"
-check "missing code -> 400" "400" "$(exchange '{}' | tail -1)"
-check "code too long -> 400" "400" "$(exchange "{\"code\":\"$(printf 'A%.0s' {1..65})\"}" | tail -1)"
-out=$(exchange '{"code":"NOPE"}')
+check "empty body -> 400"       "400" "$(exchange '' | tail -1)"
+check "missing code -> 400"     "400" "$(exchange "{\"code_verifier\":\"$V\"}" | tail -1)"
+check "missing verifier -> 400" "400" "$(exchange '{"code":"x"}' | tail -1)"
+check "code too long -> 400"    "400" "$(exchange "$(body "$(printf 'A%.0s' {1..65})")" | tail -1)"
+out=$(exchange "$(body NOPE)")
 check "unknown code -> 401" "401" "$(tail -1 <<<"$out")"
 check "401 message"         "login link expired" "$out"
 
 echo "== 4. exchange success, single use, /auth/me, logout"
 code=$(handoff)
-out=$(exchange "{\"code\":\"$code\"}")
+out=$(exchange "$(body "$code")")
 token=$(head -1 <<<"$out" | jq -r .access_token)
-check "valid code -> 200"     "200" "$(tail -1 <<<"$out")"
+check "valid code + verifier -> 200" "200" "$(tail -1 <<<"$out")"
 check "returns Bearer token"  "\"token_type\":\"Bearer\"" "$out"
-check "replay -> 401"         "401" "$(exchange "{\"code\":\"$code\"}" | tail -1)"
+check "replay -> 401"         "401" "$(exchange "$(body "$code")" | tail -1)"
 me=$(curl -s "$API/auth/me" -H "Authorization: Bearer $token")
 check "/auth/me works with token" "\"id\":$USER_ID" "$me"
 check "logout -> 204"         "204" "$(status -X POST "$API/auth/logout" -H "Authorization: Bearer $token")"
@@ -355,19 +382,26 @@ check "token revoked -> 401"  "401" "$(status "$API/auth/me" -H "Authorization: 
 
 echo "== 5. expired code"
 code=$(handoff 1); sleep 2
-check "expired code -> 401" "401" "$(exchange "{\"code\":\"$code\"}" | tail -1)"
+check "expired code -> 401" "401" "$(exchange "$(body "$code")" | tail -1)"
 
 echo "-- waiting 60s for the exchange rate limit window"; sleep 61
 
-echo "== 6. password login still returns a token"
+echo "== 6. code is bound to the browser that started the login"
+code=$(handoff)
+out=$(exchange "$(body "$code" "$OTHER_V")")
+check "other browser's verifier -> 401" "401" "$(tail -1 <<<"$out")"
+check "same message as an expired code" "login link expired" "$out"
+check "wrong verifier burns the code"   "401" "$(exchange "$(body "$code")" | tail -1)"
+
+echo "== 7. password login still returns a token"
 admin=$(curl -s "$API/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
 admin_token=$(jq -r .access_token <<<"$admin")
 check "admin login has access_token" "eyJ" "$admin_token"
 patch() { curl -s -o /dev/null -w '%{http_code}' -X PATCH "$API/users/$USER_ID" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -d "$1"; }
 
-echo "== 7. user with a phone gets an SMS challenge"
+echo "== 8. user with a phone gets an SMS challenge"
 check "set phone" "200" "$(patch '{"phone":"2055551234"}')"
-out=$(exchange "{\"code\":\"$(handoff)\"}")
+out=$(exchange "$(body "$(handoff)")")
 check "exchange -> 202" "202" "$(tail -1 <<<"$out")"
 check "phone hint" "******1234" "$out"
 challenge=$(head -1 <<<"$out" | jq -r .challenge_id)
@@ -378,16 +412,16 @@ out=$(curl -s -w '\n%{http_code}' "$API/auth/login/verify" -H 'Content-Type: app
 check "verify -> 200 with token" "200" "$(tail -1 <<<"$out")"
 check "remove phone" "200" "$(patch '{"phone":""}')"
 
-echo "== 8. disabled user is refused at exchange"
+echo "== 9. disabled user is refused at exchange"
 code=$(handoff)
 check "disable user" "200" "$(patch '{"is_active":false}')"
-out=$(exchange "{\"code\":\"$code\"}")
+out=$(exchange "$(body "$code")")
 check "exchange -> 401" "401" "$(tail -1 <<<"$out")"
 check "401 message" "cannot sign in" "$out"
 check "enable user" "200" "$(patch '{"is_active":true}')"
 
-echo "== 9. rate limit"
-last=""; for _ in $(seq 1 12); do last=$(exchange '{"code":"NOPE"}' | tail -1); done
+echo "== 10. rate limit"
+last=""; for _ in $(seq 1 12); do last=$(exchange "$(body NOPE)" | tail -1); done
 check "11th request in a minute -> 429" "429" "$last"
 
 echo; echo "passed: $pass  failed: $fail"
@@ -397,12 +431,25 @@ echo; echo "passed: $pass  failed: $fail"
 
 ### 5. Frontend integration
 
-The login button is a plain link, not a `fetch` call:
+The login button creates a fresh `code_verifier`, keeps it in `sessionStorage` and
+navigates (not `fetch`) to the login URL with its SHA-256:
 
-```html
-<a href="https://auth.example.com/api/v1/auth/google/login"
-  >Sign in with Google</a
->
+```js
+const b64url = (bytes) =>
+  btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+async function signInWithGoogle() {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier),
+  );
+  sessionStorage.setItem("google_verifier", verifier);
+  location.href = `https://auth.example.com/api/v1/auth/google/login?code_challenge=${b64url(new Uint8Array(digest))}`;
+}
 ```
 
 The page at `OAUTH_FRONTEND_URL`:
@@ -410,13 +457,17 @@ The page at `OAUTH_FRONTEND_URL`:
 ```js
 const params = new URLSearchParams(location.search);
 history.replaceState(null, "", location.pathname); // drop ?code from the URL
-if (params.has("error"))
+const verifier = sessionStorage.getItem("google_verifier");
+sessionStorage.removeItem("google_verifier");
+if (!verifier)
+  showError("start the login again"); // this browser did not start it
+else if (params.has("error"))
   showError(params.get("error")); // access_denied, not_allowed, ...
 else {
   const res = await fetch("/api/v1/auth/google/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code: params.get("code") }),
+    body: JSON.stringify({ code: params.get("code"), code_verifier: verifier }),
   });
   if (res.status === 200) saveToken((await res.json()).access_token);
   else if (res.status === 202)
@@ -439,16 +490,15 @@ If the frontend runs on another origin, add it to `CORS_ALLOWED_ORIGINS`.
 | `?error=invalid_state`                       | Different browser or profile, cookies blocked, or more than 10 minutes on Google's page                                         |
 | `?error=not_allowed`                         | No user with that email, user disabled, email not verified, or the user is linked to another Google account                     |
 | `?error=failed`                              | See `google login failed` in the log, e.g. `invalid_grant` (code reused or expired) or a wrong client secret (`invalid_client`) |
-| Exchange `401 login link expired`            | Code older than 60 seconds or already used; sign in again                                                                       |
+| Exchange `401 login link expired`            | Code older than 60 seconds, already used, or a `code_verifier` from another login; sign in again                                |
+| `400` on `/auth/google/login`                | `code_challenge` missing or not 43 base64url characters                                                                         |
 
 ## Known limitations
 
-- **Handoff code fixation.** An attacker can finish a Google login with their own
-  account and send the victim a link to `OAUTH_FRONTEND_URL?code=<attacker's code>`;
-  the victim would then be logged in as the attacker. The 60-second lifetime makes
-  this hard; binding the code to the state cookie would close it.
 - **Rate limits and the login lockout are per instance** (in memory), like the
   password login.
 - **No unlink endpoint.** Unlinking is done in SQL (see [Data](#data)).
-- **No automated Go tests yet** for the Google handler and service; the checks above
-  are run by hand.
+- **No Go test talks to Google itself.** `oauth.Google` is covered by the manual
+  checks above; the handler, service and handoff codes have Go tests
+  (`internal/handler/google_test.go`, `internal/service/auth_google_test.go`,
+  `internal/oauth/handoff_test.go`).

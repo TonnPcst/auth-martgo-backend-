@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 
 	"github.com/TonnPcst/martgo-auth/internal/apperr"
 	"github.com/TonnPcst/martgo-auth/internal/httpx"
@@ -15,7 +16,7 @@ import (
 )
 
 type GoogleLogin interface {
-	Start(ctx context.Context) (state, authURL string, err error)
+	Start(ctx context.Context, clientChallenge string) (state, authURL string, err error)
 	Finish(ctx context.Context, state, code string) (oauth.Identity, error)
 }
 
@@ -23,6 +24,8 @@ const (
 	stateCookie     = "martgo_oauth_state"
 	stateCookiePath = "/api/v1/auth/google"
 )
+
+var challengeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 type GoogleHandler struct {
 	google      GoogleLogin
@@ -32,21 +35,29 @@ type GoogleHandler struct {
 }
 
 type googleExchangeRequest struct {
-	Code string `json:"code" validate:"required,max=64"`
+	Code         string `json:"code" validate:"required,max=64"`
+	CodeVerifier string `json:"code_verifier" validate:"required,min=43,max=128"`
 }
 
 // Login sends the browser to Google. GET /api/v1/auth/google/login (10 requests/min per IP)
 //
 // ENG: Also puts the state in an HttpOnly cookie. The callback must bring back the same
 // state, which ties the login to this browser: an attacker cannot make a victim finish
-// a login the attacker started (login CSRF).
+// a login the attacker started (login CSRF). Requires ?code_challenge=: the frontend
+// keeps the matching code_verifier and must show it at /exchange, so the one-time
+// code only works in the browser that started the login.
 // LAO: ສົ່ງ browser ໄປໜ້າ login ຂອງ Google ແລະ ເກັບ state ໃນ cookie ເພື່ອກັນ login CSRF.
 //
 // @param w - response writer
-// @param r - browser request
-// @returns writes 302 to Google
+// @param r - browser request with ?code_challenge=
+// @returns writes 302 to Google; 400 if code_challenge is missing or malformed
 func (h *GoogleHandler) Login(w http.ResponseWriter, r *http.Request) {
-	state, authURL, err := h.google.Start(r.Context())
+	challenge := r.URL.Query().Get("code_challenge")
+	if !challengeRe.MatchString(challenge) {
+		httpx.Error(w, http.StatusBadRequest, "code_challenge must be the base64url SHA-256 of a code_verifier (43 characters)")
+		return
+	}
+	state, authURL, err := h.google.Start(r.Context(), challenge)
 	if err != nil {
 		httpx.HandleError(w, r, err)
 		return
@@ -107,20 +118,21 @@ func (h *GoogleHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 // Exchange turns the one-time code into a login. POST /api/v1/auth/google/exchange (10 requests/min per IP)
 //
-// ENG: Called by the frontend with the code from the callback redirect. Answers like
-// POST /auth/login: 200 with the token, or 202 with an SMS challenge.
+// ENG: Called by the frontend with the code from the callback redirect and the
+// code_verifier it kept. Answers like POST /auth/login: 200 with the token, or 202
+// with an SMS challenge.
 // LAO: ແລກລະຫັດໃຊ້ຄັ້ງດຽວເປັນ token (200) ຫຼື OTP challenge (202).
 //
 // @param w - response writer
-// @param r - request with {code}
-// @returns writes 200 or 202; 401 if the code is unknown, used or expired
+// @param r - request with {code, code_verifier}
+// @returns writes 200 or 202; 401 if the code is unknown, used, expired or the verifier does not match
 func (h *GoogleHandler) Exchange(w http.ResponseWriter, r *http.Request) {
 	var req googleExchangeRequest
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		httpx.HandleError(w, r, err)
 		return
 	}
-	res, err := h.auth.ExchangeHandoff(r.Context(), req.Code)
+	res, err := h.auth.ExchangeHandoff(r.Context(), req.Code, req.CodeVerifier)
 	if err != nil {
 		httpx.HandleError(w, r, err)
 		return

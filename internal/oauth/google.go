@@ -26,10 +26,11 @@ var (
 )
 
 type Identity struct {
-	Provider      string
-	Subject       string
-	Email         string
-	EmailVerified bool
+	Provider        string
+	Subject         string
+	Email           string
+	EmailVerified   bool
+	ClientChallenge string
 }
 
 type GoogleConfig struct {
@@ -77,7 +78,7 @@ func NewGoogle(ctx context.Context, rdb *redis.Client, cfg GoogleConfig) (*Googl
 
 // stateKey returns the Redis key of a login in progress.
 //
-// ENG: Format: "oauth:state:<state>". The value is "<pkce verifier>:<nonce>".
+// ENG: Format: "oauth:state:<state>". The value is "<pkce verifier>:<nonce>:<client challenge>".
 // LAO: ສ້າງ key ຂອງ Redis ສຳລັບ login ທີ່ກຳລັງດຳເນີນຢູ່.
 //
 // @param state - random state sent to Google
@@ -90,15 +91,17 @@ func stateKey(state string) string { return "oauth:state:" + state }
 // state (sent back by Google, proves the callback belongs to a login we started),
 // the PKCE verifier (only its hash goes to Google, so a stolen code is useless) and
 // the nonce (copied by Google into the ID token, so an old token cannot be replayed).
+// The frontend's code_challenge is kept with them and handed back by Finish.
 // LAO: ເລີ່ມ login ດ້ວຍ Google — ສ້າງ state, PKCE verifier ແລະ nonce ເກັບໄວ້ໃນ Redis 10 ນາທີ.
 //
 // @param ctx - request context
+// @param clientChallenge - code_challenge from the frontend (base64url SHA-256 of its code_verifier)
 // @returns the state (the caller also puts it in a cookie) and the Google URL to redirect to
-func (g *Google) Start(ctx context.Context) (state, authURL string, err error) {
+func (g *Google) Start(ctx context.Context, clientChallenge string) (state, authURL string, err error) {
 	state = rand.Text()
 	verifier := oauth2.GenerateVerifier()
 	nonce := rand.Text()
-	if err := g.rdb.Set(ctx, stateKey(state), verifier+":"+nonce, stateTTL).Err(); err != nil {
+	if err := g.rdb.Set(ctx, stateKey(state), verifier+":"+nonce+":"+clientChallenge, stateTTL).Err(); err != nil {
 		return "", "", fmt.Errorf("store oauth state: %w", err)
 	}
 	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)}
@@ -134,7 +137,11 @@ func (g *Google) Finish(ctx context.Context, state, code string) (Identity, erro
 	if err != nil {
 		return Identity{}, fmt.Errorf("load oauth state: %w", err)
 	}
-	verifier, nonce, _ := strings.Cut(saved, ":")
+	parts := strings.SplitN(saved, ":", 3)
+	if len(parts) != 3 {
+		return Identity{}, ErrInvalidState
+	}
+	verifier, nonce, clientChallenge := parts[0], parts[1], parts[2]
 
 	tok, err := g.oauth.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
@@ -159,5 +166,5 @@ func (g *Google) Finish(ctx context.Context, state, code string) (Identity, erro
 	if g.domain != "" && strings.ToLower(c.HostedDomain) != g.domain {
 		return Identity{}, ErrWrongDomain
 	}
-	return Identity{Provider: ProviderGoogle, Subject: idToken.Subject, Email: c.Email, EmailVerified: c.EmailVerified}, nil
+	return Identity{Provider: ProviderGoogle, Subject: idToken.Subject, Email: c.Email, EmailVerified: c.EmailVerified, ClientChallenge: clientChallenge}, nil
 }

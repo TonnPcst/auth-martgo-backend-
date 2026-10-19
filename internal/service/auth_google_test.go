@@ -75,21 +75,30 @@ func (f *fakeOTP) Verify(context.Context, string, string) (otp.Subject, error) {
 	return otp.Subject{}, nil
 }
 
-type fakeHandoffs map[string]int64
+type fakeHandoff struct {
+	userID    int64
+	challenge string
+}
 
-func (f fakeHandoffs) Create(_ context.Context, userID int64) (string, error) {
+// fakeHandoffs skips the SHA-256: the verifier must equal the challenge.
+type fakeHandoffs map[string]fakeHandoff
+
+func (f fakeHandoffs) Create(_ context.Context, userID int64, clientChallenge string) (string, error) {
 	code := fmt.Sprintf("CODE%d", len(f)+1)
-	f[code] = userID
+	f[code] = fakeHandoff{userID: userID, challenge: clientChallenge}
 	return code, nil
 }
 
-func (f fakeHandoffs) Redeem(_ context.Context, code string) (int64, error) {
-	id, ok := f[code]
+func (f fakeHandoffs) Redeem(_ context.Context, code, verifier string) (int64, error) {
+	h, ok := f[code]
 	if !ok {
 		return 0, oauth.ErrHandoffNotFound
 	}
 	delete(f, code)
-	return id, nil
+	if verifier != h.challenge {
+		return 0, oauth.ErrHandoffMismatch
+	}
+	return h.userID, nil
 }
 
 var (
@@ -97,7 +106,7 @@ var (
 	alice   = db.User{ID: 1, Email: "alice@martgo.local", Role: "cashier", IsActive: true, TokenVersion: 1}
 	bob     = db.User{ID: 2, Email: "bob@martgo.local", Role: "cashier", IsActive: false, TokenVersion: 1}
 	carol   = db.User{ID: 3, Email: "carol@martgo.local", Role: "manager", IsActive: true, TokenVersion: 1, Phone: &phone}
-	googleA = oauth.Identity{Provider: oauth.ProviderGoogle, Subject: "sub-alice", Email: "Alice@MartGo.local", EmailVerified: true}
+	googleA = oauth.Identity{Provider: oauth.ProviderGoogle, Subject: "sub-alice", Email: "Alice@MartGo.local", EmailVerified: true, ClientChallenge: "CHAL"}
 )
 
 type googleTest struct {
@@ -126,7 +135,7 @@ func TestLoginWithIdentityLinksByVerifiedEmail(t *testing.T) {
 
 	code, err := tt.svc.LoginWithIdentity(context.Background(), googleA)
 	require.NoError(t, err)
-	assert.Equal(t, alice.ID, tt.handoffs[code])
+	assert.Equal(t, fakeHandoff{userID: alice.ID, challenge: "CHAL"}, tt.handoffs[code])
 	assert.Equal(t, alice.ID, tt.store.identities["sub-alice"], "first login links the account")
 }
 
@@ -138,7 +147,7 @@ func TestLoginWithIdentityUsesSubjectAfterLinking(t *testing.T) {
 	moved.Email = "someone-else@gmail.com"
 	code, err := tt.svc.LoginWithIdentity(context.Background(), moved)
 	require.NoError(t, err)
-	assert.Equal(t, alice.ID, tt.handoffs[code])
+	assert.Equal(t, alice.ID, tt.handoffs[code].userID)
 }
 
 func TestLoginWithIdentityRefusals(t *testing.T) {
@@ -169,21 +178,30 @@ func TestExchangeHandoffIssuesToken(t *testing.T) {
 	code, err := tt.svc.LoginWithIdentity(context.Background(), googleA)
 	require.NoError(t, err)
 
-	res, err := tt.svc.ExchangeHandoff(context.Background(), code)
+	res, err := tt.svc.ExchangeHandoff(context.Background(), code, "CHAL")
 	require.NoError(t, err)
 	assert.NotEmpty(t, res.Token)
 	assert.Nil(t, res.Challenge)
 	assert.Equal(t, alice.ID, res.User.ID)
 
-	_, err = tt.svc.ExchangeHandoff(context.Background(), code)
+	_, err = tt.svc.ExchangeHandoff(context.Background(), code, "CHAL")
 	assert.ErrorIs(t, err, errHandoffInvalid, "a code works once")
+}
+
+func TestExchangeHandoffRefusesOtherBrowser(t *testing.T) {
+	tt := newGoogleTest(t)
+	code, err := tt.svc.LoginWithIdentity(context.Background(), googleA)
+	require.NoError(t, err)
+
+	_, err = tt.svc.ExchangeHandoff(context.Background(), code, "SOMEONE-ELSES-VERIFIER")
+	assert.ErrorIs(t, err, errHandoffInvalid)
 }
 
 func TestExchangeHandoffStartsOTPForPhoneUsers(t *testing.T) {
 	tt := newGoogleTest(t)
-	tt.handoffs["C"] = carol.ID
+	tt.handoffs["C"] = fakeHandoff{userID: carol.ID, challenge: "CHAL"}
 
-	res, err := tt.svc.ExchangeHandoff(context.Background(), "C")
+	res, err := tt.svc.ExchangeHandoff(context.Background(), "C", "CHAL")
 	require.NoError(t, err)
 	assert.Empty(t, res.Token, "no token before the SMS code")
 	require.NotNil(t, res.Challenge)
@@ -199,13 +217,13 @@ func TestExchangeHandoffRefusesUserDisabledMeanwhile(t *testing.T) {
 	disabled.IsActive = false
 	tt.store.users[alice.ID] = disabled
 
-	_, err = tt.svc.ExchangeHandoff(context.Background(), code)
+	_, err = tt.svc.ExchangeHandoff(context.Background(), code, "CHAL")
 	assert.ErrorIs(t, err, errIdentityNotAllowed)
 }
 
 func TestExchangeHandoffUnknownCode(t *testing.T) {
 	tt := newGoogleTest(t)
 
-	_, err := tt.svc.ExchangeHandoff(context.Background(), "NOPE")
+	_, err := tt.svc.ExchangeHandoff(context.Background(), "NOPE", "CHAL")
 	assert.ErrorIs(t, err, errHandoffInvalid)
 }

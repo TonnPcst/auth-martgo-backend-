@@ -28,8 +28,8 @@ type OTPManager interface {
 }
 
 type HandoffStore interface {
-	Create(ctx context.Context, userID int64) (string, error)
-	Redeem(ctx context.Context, code string) (int64, error)
+	Create(ctx context.Context, userID int64, clientChallenge string) (string, error)
+	Redeem(ctx context.Context, code string, verifier string) (int64, error)
 }
 
 type AuthService struct {
@@ -205,7 +205,7 @@ func (s *AuthService) LoginWithIdentity(ctx context.Context, id oauth.Identity) 
 	if !user.IsActive {
 		return "", errIdentityNotAllowed
 	}
-	return s.handoffs.Create(ctx, user.ID)
+	return s.handoffs.Create(ctx, user.ID, id.ClientChallenge)
 }
 
 // linkIdentity links a Google account to the existing user with the same email.
@@ -248,9 +248,9 @@ func (s *AuthService) linkIdentity(ctx context.Context, id oauth.Identity) (db.U
 // @param ctx - request context
 // @param code - one-time code from the frontend
 // @returns the login result, or an Unauthorized error
-func (s *AuthService) ExchangeHandoff(ctx context.Context, code string) (LoginResult, error) {
-	userID, err := s.handoffs.Redeem(ctx, code)
-	if errors.Is(err, oauth.ErrHandoffNotFound) {
+func (s *AuthService) ExchangeHandoff(ctx context.Context, code string, verifier string) (LoginResult, error) {
+	userID, err := s.handoffs.Redeem(ctx, code, verifier)
+	if errors.Is(err, oauth.ErrHandoffNotFound) || errors.Is(err, oauth.ErrHandoffMismatch) {
 		return LoginResult{}, errHandoffInvalid
 	}
 	if err != nil {

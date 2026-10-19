@@ -6,8 +6,9 @@ info:
     Login and staff user management for martgo. The access token returned by
     `POST /auth/login` is also accepted by mart-api (catalog, stock, sales, purchases).
 
-    **Login with Google:** open `/api/v1/auth/google/login` in a new tab, then send
-    the `code` you are redirected with to `POST /auth/google/exchange`.
+    **Login with Google:** open `/api/v1/auth/google/login?code_challenge=...` in a
+    new tab, then send the `code` you are redirected with, plus the matching
+    `code_verifier`, to `POST /auth/google/exchange`.
 
     **Auth:** call `POST /auth/login`, then click **Authorize** and paste the
     `access_token`. Roles: `admin`, `manager`, `cashier`.
@@ -138,9 +139,16 @@ paths:
       operationId: googleLogin
       summary: Start "Login with Google" (open in a browser tab)
       description: |
-        **Do not use "Try it out" here.** Open
-        [/api/v1/auth/google/login](/api/v1/auth/google/login) in a new browser tab.
-        Swagger UI calls the API with fetch, which cannot follow a redirect to Google.
+        **Do not use "Try it out" here.** Open the link in a new browser tab; Swagger
+        UI calls the API with fetch, which cannot follow a redirect to Google. For
+        local testing use the RFC 7636 example pair (never in a real frontend):
+        [/api/v1/auth/google/login?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM](/api/v1/auth/google/login?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM),
+        then exchange with `code_verifier` `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk`.
+
+        The frontend creates a random `code_verifier` (43-128 characters), keeps it
+        (e.g. in sessionStorage) and sends `code_challenge = base64url(SHA-256(code_verifier))`.
+        The one-time code can then only be exchanged together with that verifier, so a
+        code sent to another browser is useless.
 
         Sets the `martgo_oauth_state` cookie and redirects to Google. After the user
         signs in, Google sends the browser to `/auth/google/callback`, which redirects
@@ -152,11 +160,24 @@ paths:
         Only available when `GOOGLE_CLIENT_ID` is set. Rate limited to 10 requests per
         minute per client IP.
       security: []
+      parameters:
+        - name: code_challenge
+          in: query
+          required: true
+          description: base64url (no padding) SHA-256 of the frontend's code_verifier
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+          example: E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
       responses:
         "302":
           description: Redirect to Google's sign-in page
           headers:
             Location: { schema: { type: string, format: uri } }
+        "400":
+          description: Missing or malformed code_challenge
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "code_challenge must be the base64url SHA-256 of a code_verifier (43 characters)" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /auth/google/callback:
@@ -192,7 +213,9 @@ paths:
       operationId: googleExchange
       summary: Trade the one-time code from the Google login for a token
       description: |
-        The code works once and expires after 60 seconds. Answers like
+        The code works once and expires after 60 seconds, and only together with the
+        `code_verifier` whose SHA-256 was sent to `/auth/google/login` (a wrong verifier
+        also uses the code up). Answers like
         `POST /auth/login`: users with a phone get `202` and finish with
         `POST /auth/login/verify`. Rate limited to 10 requests per minute per client IP.
       security: []
@@ -201,7 +224,7 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/GoogleExchangeRequest" }
-            example: { code: 7NQ2ZK4XWJ3M5PRT6YV8B2CDFG }
+            example: { code: 7NQ2ZK4XWJ3M5PRT6YV8B2CDFG, code_verifier: dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk }
       responses:
         "200":
           description: Logged in
@@ -215,7 +238,7 @@ paths:
               schema: { $ref: "#/components/schemas/OTPChallenge" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
-          description: Unknown, used or expired code, or the user was disabled
+          description: Unknown, used or expired code, wrong code_verifier, or the user was disabled
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -438,9 +461,10 @@ components:
 
     GoogleExchangeRequest:
       type: object
-      required: [code]
+      required: [code, code_verifier]
       properties:
         code: { type: string, maxLength: 64 }
+        code_verifier: { type: string, minLength: 43, maxLength: 128 }
 
     Phone:
       type: string

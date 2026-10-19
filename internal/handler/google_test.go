@@ -23,13 +23,16 @@ import (
 	"github.com/TonnPcst/martgo-auth/internal/token"
 )
 
-const testFrontend = "http://frontend.test/done"
+const (
+	testFrontend  = "http://frontend.test/done"
+	testChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+)
 
 type fakeGoogle struct {
 	finishErr error
 }
 
-func (f *fakeGoogle) Start(context.Context) (string, string, error) {
+func (f *fakeGoogle) Start(context.Context, string) (string, string, error) {
 	return "STATE123", "https://accounts.google.com/o/oauth2/auth?state=STATE123", nil
 }
 
@@ -73,7 +76,7 @@ func TestGoogleRoutesOffWithoutConfig(t *testing.T) {
 func TestGoogleLoginSetsStateCookie(t *testing.T) {
 	h := newGoogleRouter(t, &fakeGoogle{})
 
-	rec := send(h, http.MethodGet, "/api/v1/auth/google/login", "")
+	rec := send(h, http.MethodGet, "/api/v1/auth/google/login?code_challenge="+testChallenge, "")
 	require.Equal(t, http.StatusFound, rec.Code)
 	assert.True(t, strings.HasPrefix(rec.Header().Get("Location"), "https://accounts.google.com/"))
 
@@ -85,6 +88,16 @@ func TestGoogleLoginSetsStateCookie(t *testing.T) {
 	assert.True(t, c.HttpOnly)
 	assert.Equal(t, http.SameSiteLaxMode, c.SameSite)
 	assert.Equal(t, stateCookiePath, c.Path)
+}
+
+func TestGoogleLoginNeedsCodeChallenge(t *testing.T) {
+	h := newGoogleRouter(t, &fakeGoogle{})
+
+	for _, q := range []string{"", "?code_challenge=short", "?code_challenge=" + testChallenge[:42] + "="} {
+		rec := send(h, http.MethodGet, "/api/v1/auth/google/login"+q, "")
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "query %q", q)
+		assert.Empty(t, rec.Result().Cookies(), "no state cookie without a challenge")
+	}
 }
 
 func TestGoogleCallbackErrors(t *testing.T) {
@@ -124,7 +137,15 @@ func TestGoogleCallbackClearsCookie(t *testing.T) {
 func TestGoogleExchangeValidation(t *testing.T) {
 	h := newGoogleRouter(t, &fakeGoogle{})
 
-	for _, body := range []string{``, `{}`, `{"code":"` + strings.Repeat("A", 65) + `"}`, `{"code":"x","extra":1}`} {
+	verifier := strings.Repeat("v", 43)
+	for _, body := range []string{
+		``,
+		`{}`,
+		`{"code":"x"}`,
+		`{"code":"x","code_verifier":"too-short"}`,
+		`{"code":"` + strings.Repeat("A", 65) + `","code_verifier":"` + verifier + `"}`,
+		`{"code":"x","code_verifier":"` + verifier + `","extra":1}`,
+	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/google/exchange", strings.NewReader(body))
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)

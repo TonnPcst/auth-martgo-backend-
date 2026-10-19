@@ -20,3 +20,10 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 	Phone        *string   `json:"phone"`
 }
+
+type UserIdentity struct {
+	Provider  string    `json:"provider"`
+	Subject   string    `json:"subject"`
+	UserID    int64     `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+}

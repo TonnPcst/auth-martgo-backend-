@@ -11,21 +11,26 @@ import (
 )
 
 type Config struct {
-	Env                string
-	HTTPAddr           string
-	LogLevel           slog.Level
-	DatabaseURL        string
-	RedisURL           string
-	JWTPrivateKeyFile  string
-	JWTTTL             time.Duration
-	ShutdownTimeout    time.Duration
-	TrustProxy         bool
-	EnableDocs         bool
-	CORSAllowedOrigins []string
-	SMSProvider        string
-	TelbizURL          string
-	TelbizClientID     string
-	TelbizSecret       string
+	Env                 string
+	HTTPAddr            string
+	LogLevel            slog.Level
+	DatabaseURL         string
+	RedisURL            string
+	JWTPrivateKeyFile   string
+	JWTTTL              time.Duration
+	ShutdownTimeout     time.Duration
+	TrustProxy          bool
+	EnableDocs          bool
+	CORSAllowedOrigins  []string
+	SMSProvider         string
+	TelbizURL           string
+	TelbizClientID      string
+	TelbizSecret        string
+	GoogleClientID      string
+	GoogleClientSecret  string
+	GoogleRedirectURL   string
+	GoogleAllowedDomain string
+	OAuthFrontendURL    string
 }
 
 // Load reads the service configuration from environment variables.
@@ -35,20 +40,26 @@ type Config struct {
 // required and must not use sslmode=disable in production. SMS_PROVIDER must be
 // "log" or "telbiz": "log" is refused in production because it writes login codes
 // to the log, and "telbiz" needs TELBIZ_CLIENT_ID and TELBIZ_SECRET.
+// Google login is optional: when GOOGLE_CLIENT_ID is set, GOOGLE_CLIENT_SECRET and OAUTH_FRONTEND_URL are required too.
 // LAO: ອ່ານການຕັ້ງຄ່າຈາກ env ພ້ອມຄ່າເລີ່ມຕົ້ນ ແລະ ກວດສອບ (ລວມທັງຜູ້ໃຫ້ບໍລິການ SMS).
 //
 // @returns the config, and a joined error listing every invalid setting
 func Load() (Config, error) {
 	cfg := Config{
-		Env:               getEnv("APP_ENV", "development"),
-		HTTPAddr:          getEnv("HTTP_ADDR", ":8081"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6380/0"),
-		JWTPrivateKeyFile: getEnv("JWT_PRIVATE_KEY_FILE", "keys/jwt_private.pem"),
-		SMSProvider:       getEnv("SMS_PROVIDER", "log"),
-		TelbizURL:         getEnv("TELBIZ_URL", "https://api.telbiz.la"),
-		TelbizClientID:    getEnv("TELBIZ_CLIENT_ID", ""),
-		TelbizSecret:      getEnv("TELBIZ_SECRET", ""),
+		Env:                 getEnv("APP_ENV", "development"),
+		HTTPAddr:            getEnv("HTTP_ADDR", ":8081"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		RedisURL:            getEnv("REDIS_URL", "redis://localhost:6380/0"),
+		JWTPrivateKeyFile:   getEnv("JWT_PRIVATE_KEY_FILE", "keys/jwt_private.pem"),
+		SMSProvider:         getEnv("SMS_PROVIDER", "log"),
+		TelbizURL:           getEnv("TELBIZ_URL", "https://api.telbiz.la"),
+		TelbizClientID:      getEnv("TELBIZ_CLIENT_ID", ""),
+		TelbizSecret:        getEnv("TELBIZ_SECRET", ""),
+		GoogleClientID:      getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:  getEnv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURL:   getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8081/api/v1/auth/google/callback"),
+		GoogleAllowedDomain: getEnv("GOOGLE_ALLOWED_DOMAIN", ""),
+		OAuthFrontendURL:    getEnv("OAUTH_FRONTEND_URL", ""),
 	}
 
 	var errs []error
@@ -90,8 +101,25 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("SMS_PROVIDER must be log or telbiz, got %q", cfg.SMSProvider))
 	}
 
+	if cfg.GoogleEnabled() {
+		if cfg.GoogleClientSecret == "" || cfg.OAuthFrontendURL == "" {
+			errs = append(errs, errors.New("GOOGLE_CLIENT_SECRET and OAUTH_FRONTEND_URL are required when GOOGLE_CLIENT_ID is set"))
+		}
+		if cfg.Env == "production" && (!strings.HasPrefix(cfg.GoogleRedirectURL, "https://") || !strings.HasPrefix(cfg.OAuthFrontendURL, "https://")) {
+			errs = append(errs, errors.New("GOOGLE_REDIRECT_URL and OAUTH_FRONTEND_URL must use https in production"))
+		}
+	}
+
 	return cfg, errors.Join(errs...)
 }
+
+// GoogleEnabled reports whether "Login with Google" is configured.
+//
+// ENG: The feature is on when GOOGLE_CLIENT_ID is set; without it the Google routes are not mounted.
+// LAO: ກວດວ່າເປີດໃຊ້ login ດ້ວຍ Google ຫຼືບໍ່ (ມີ GOOGLE_CLIENT_ID).
+//
+// @returns true when Google login is enabled
+func (c Config) GoogleEnabled() bool { return c.GoogleClientID != "" }
 
 // getEnv reads an environment variable, falling back to a default when it is empty.
 //

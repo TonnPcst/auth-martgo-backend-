@@ -13,6 +13,7 @@ check revocation without calling this service.
 | --------------------------- | -------------- |
 | `POST /api/v1/auth/login`   | anyone (rate limited) |
 | `POST /api/v1/auth/login/verify`, `/resend` | anyone (rate limited), second step for users with a phone |
+| `GET /api/v1/auth/google/login`, `/callback`, `POST /exchange` | anyone (rate limited), only when `GOOGLE_CLIENT_ID` is set |
 | `GET /api/v1/auth/me`       | any logged-in user |
 | `POST /api/v1/auth/logout`  | any logged-in user (revokes all their tokens) |
 | `/api/v1/users` (CRUD)      | admin |
@@ -42,6 +43,16 @@ phone log in in one step as before. Admins set or remove (`""`) the phone with
   (`020 xxxx xxxx` or `030 xxx xxxx`); they are stored as `20xxxxxxxx`.
   Each correct password sends a paid SMS; when the Telbiz balance is empty,
   logins for users with a phone fail with 500 (`CREDIT_NOT_SUFFICIENT` in the log).
+
+## Login with Google
+
+Staff can also sign in with Google (OAuth2 / OpenID Connect). Only users an admin
+already created can log in: the Google account is linked the first time by its
+verified email, then found by Google's stable `sub`. Users with a phone still get
+the SMS code. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+`OAUTH_FRONTEND_URL` to turn it on.
+
+Flow, security measures, setup and how to test: [docs/GOOGLE_LOGIN.md](docs/GOOGLE_LOGIN.md).
 
 ## Auth contract with mart-api
 

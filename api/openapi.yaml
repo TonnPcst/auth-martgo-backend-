@@ -6,6 +6,9 @@ info:
     Login and staff user management for martgo. The access token returned by
     `POST /auth/login` is also accepted by mart-api (catalog, stock, sales, purchases).
 
+    **Login with Google:** open `/api/v1/auth/google/login` in a new tab, then send
+    the `code` you are redirected with to `POST /auth/google/exchange`.
+
     **Auth:** call `POST /auth/login`, then click **Authorize** and paste the
     `access_token`. Roles: `admin`, `manager`, `cashier`.
 
@@ -70,7 +73,8 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/VerifyOTPRequest" }
-            example: { challenge_id: 24MTBK7CN26AQFLWQHGFAWEUYG, code: "395888" }
+            example:
+              { challenge_id: 24MTBK7CN26AQFLWQHGFAWEUYG, code: "395888" }
       responses:
         "200":
           description: Logged in
@@ -127,6 +131,96 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/google/login:
+    get:
+      tags: [Auth]
+      operationId: googleLogin
+      summary: Start "Login with Google" (open in a browser tab)
+      description: |
+        **Do not use "Try it out" here.** Open
+        [/api/v1/auth/google/login](/api/v1/auth/google/login) in a new browser tab.
+        Swagger UI calls the API with fetch, which cannot follow a redirect to Google.
+
+        Sets the `martgo_oauth_state` cookie and redirects to Google. After the user
+        signs in, Google sends the browser to `/auth/google/callback`, which redirects
+        to `OAUTH_FRONTEND_URL` with `?code=` (trade it within 60 seconds with
+        `POST /auth/google/exchange`) or `?error=`.
+
+        Only staff that an admin already created can log in: the Google account must
+        have a verified email equal to the user's email, or be linked to the user.
+        Only available when `GOOGLE_CLIENT_ID` is set. Rate limited to 10 requests per
+        minute per client IP.
+      security: []
+      responses:
+        "302":
+          description: Redirect to Google's sign-in page
+          headers:
+            Location: { schema: { type: string, format: uri } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /auth/google/callback:
+    get:
+      tags: [Auth]
+      operationId: googleCallback
+      summary: Google redirects the browser here (not called directly)
+      description: |
+        Checks the state against the `martgo_oauth_state` cookie, exchanges the code
+        with Google and verifies the ID token. Always redirects to `OAUTH_FRONTEND_URL`.
+      security: []
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - name: error
+          in: query
+          description: Set by Google when the user cancels
+          schema: { type: string }
+      responses:
+        "302":
+          description: |
+            Redirect to `OAUTH_FRONTEND_URL?code=<one-time code>`, or to
+            `OAUTH_FRONTEND_URL?error=<reason>` where reason is `access_denied`
+            (cancelled at Google), `invalid_state`, `not_allowed` (no active MartGo
+            user for this Google account) or `failed`.
+          headers:
+            Location: { schema: { type: string, format: uri } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /auth/google/exchange:
+    post:
+      tags: [Auth]
+      operationId: googleExchange
+      summary: Trade the one-time code from the Google login for a token
+      description: |
+        The code works once and expires after 60 seconds. Answers like
+        `POST /auth/login`: users with a phone get `202` and finish with
+        `POST /auth/login/verify`. Rate limited to 10 requests per minute per client IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GoogleExchangeRequest" }
+            example: { code: 7NQ2ZK4XWJ3M5PRT6YV8B2CDFG }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "202":
+          description: Google account accepted, SMS code sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OTPChallenge" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Unknown, used or expired code, or the user was disabled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "login link expired, please sign in again" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /auth/logout:
     post:
@@ -282,7 +376,8 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
-          example: { error: "too many failed login attempts, please try again later" }
+          example:
+            { error: "too many failed login attempts, please try again later" }
 
   schemas:
     Error:
@@ -323,7 +418,8 @@ components:
       properties:
         otp_required: { type: boolean, example: true }
         challenge_id: { type: string }
-        phone_hint: { type: string, example: "******1234", description: Only on login }
+        phone_hint:
+          { type: string, example: "******1234", description: Only on login }
         expires_at: { type: string, format: date-time }
         resend_at: { type: string, format: date-time }
 
@@ -339,6 +435,12 @@ components:
       required: [challenge_id]
       properties:
         challenge_id: { type: string, maxLength: 64 }
+
+    GoogleExchangeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, maxLength: 64 }
 
     Phone:
       type: string

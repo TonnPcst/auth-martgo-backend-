@@ -9,6 +9,7 @@ import (
 
 	"github.com/TonnPcst/martgo-auth/internal/apperr"
 	"github.com/TonnPcst/martgo-auth/internal/db"
+	"github.com/TonnPcst/martgo-auth/internal/oauth"
 	"github.com/TonnPcst/martgo-auth/internal/otp"
 	"github.com/TonnPcst/martgo-auth/internal/session"
 	"github.com/TonnPcst/martgo-auth/internal/store"
@@ -26,11 +27,17 @@ type OTPManager interface {
 	Verify(ctx context.Context, id, code string) (otp.Subject, error)
 }
 
+type HandoffStore interface {
+	Create(ctx context.Context, userID int64) (string, error)
+	Redeem(ctx context.Context, code string) (int64, error)
+}
+
 type AuthService struct {
 	store    store.Store
 	tokens   *token.Manager
 	sessions SessionWriter
 	otp      OTPManager
+	handoffs HandoffStore
 	guard    *loginGuard
 }
 
@@ -43,9 +50,10 @@ type AuthService struct {
 // @param tokens - signs access tokens
 // @param sessions - publishes session state to Redis
 // @param otps - handles SMS login codes
+// @param handoffs - one-time codes for the Google login redirect
 // @returns the service
-func NewAuthService(s store.Store, tokens *token.Manager, sessions SessionWriter, otps OTPManager) *AuthService {
-	return &AuthService{store: s, tokens: tokens, sessions: sessions, otp: otps, guard: newLoginGuard(5, 15*time.Minute)}
+func NewAuthService(s store.Store, tokens *token.Manager, sessions SessionWriter, otps OTPManager, handoffs HandoffStore) *AuthService {
+	return &AuthService{store: s, tokens: tokens, sessions: sessions, otp: otps, handoffs: handoffs, guard: newLoginGuard(5, 15*time.Minute)}
 }
 
 type LoginResult struct {
@@ -63,6 +71,8 @@ var (
 	errOTPGone            = apperr.Unauthorized("code expired, please log in again")
 	errResendTooSoon      = apperr.TooManyRequests("please wait before requesting another code")
 	errTooManySends       = apperr.TooManyRequests("no more codes can be sent, please log in again")
+	errIdentityNotAllowed = apperr.Unauthorized("this Google account cannot sign in to MartGo")
+	errHandoffInvalid     = apperr.Unauthorized("login link expired, please sign in again")
 )
 
 var dummyHash = sync.OnceValue(func() string {
@@ -104,15 +114,10 @@ func (s *AuthService) Login(ctx context.Context, email string, password string) 
 		return LoginResult{}, errInvalidCredentials
 	}
 
-	if user.Phone != nil {
-		ch, err := s.otp.Start(ctx, otp.Subject{UserID: user.ID, Email: key}, *user.Phone)
-		if err != nil {
-			return LoginResult{}, err
-		}
-		return LoginResult{User: user, Challenge: &ch}, nil
+	if user.Phone == nil {
+		s.guard.reset(key)
 	}
-	s.guard.reset(key)
-	return s.issue(ctx, user)
+	return s.complete(ctx, user)
 }
 
 // VerifyOTP finishes an SMS login and issues the token.
@@ -175,6 +180,109 @@ func (s *AuthService) ResendOTP(ctx context.Context, challengeID string) (otp.Ch
 		return otp.Challenge{}, errTooManySends
 	}
 	return ch, err
+}
+
+// LoginWithIdentity starts a session for someone Google has vouched for.
+//
+// ENG: Only staff that an admin already created may log in; nobody is signed up
+// automatically. The Google account is found by its stable subject. The first time,
+// it is linked to the user with the same email, but only if Google says the email is
+// verified. Disabled users are refused. Returns a one-time code for the frontend
+// instead of a token.
+// LAO: ເຂົ້າສູ່ລະບົບດ້ວຍບັນຊີ Google — ສະເພາະພະນັກງານທີ່ admin ສ້າງໄວ້, ຜູກບັນຊີຄັ້ງທຳອິດດ້ວຍ email ທີ່ຢືນຢັນແລ້ວ.
+//
+// @param ctx - request context
+// @param id - identity verified by the oauth package
+// @returns the one-time code, or an Unauthorized error
+func (s *AuthService) LoginWithIdentity(ctx context.Context, id oauth.Identity) (string, error) {
+	user, err := s.store.GetUserByIdentity(ctx, db.GetUserByIdentityParams{Provider: id.Provider, Subject: id.Subject})
+	if store.IsNotFound(err) {
+		user, err = s.linkIdentity(ctx, id)
+	}
+	if err != nil {
+		return "", err
+	}
+	if !user.IsActive {
+		return "", errIdentityNotAllowed
+	}
+	return s.handoffs.Create(ctx, user.ID)
+}
+
+// linkIdentity links a Google account to the existing user with the same email.
+//
+// ENG: Refused when the email is not verified by Google, when no user has that email,
+// or when the user already has a different Google account linked (unique violation).
+// LAO: ຜູກບັນຊີ Google ກັບຜູ້ໃຊ້ທີ່ມີ email ດຽວກັນ — ຕ້ອງເປັນ email ທີ່ Google ຢືນຢັນແລ້ວ.
+//
+// @param ctx - request context
+// @param id - identity verified by the oauth package
+// @returns the linked user, or an Unauthorized error
+func (s *AuthService) linkIdentity(ctx context.Context, id oauth.Identity) (db.User, error) {
+	if !id.EmailVerified {
+		return db.User{}, errIdentityNotAllowed
+	}
+	user, err := s.store.GetUserByEmail(ctx, normalizeEmail(id.Email))
+	if store.IsNotFound(err) {
+		return db.User{}, errIdentityNotAllowed
+	}
+	if err != nil {
+		return db.User{}, err
+	}
+	err = s.store.CreateUserIdentity(ctx, db.CreateUserIdentityParams{Provider: id.Provider, Subject: id.Subject, UserID: user.ID})
+	if store.IsUniqueViolation(err) {
+		return db.User{}, errIdentityNotAllowed
+	}
+	if err != nil {
+		return db.User{}, err
+	}
+	return user, nil
+}
+
+// ExchangeHandoff turns the one-time code from LoginWithIdentity into a login.
+//
+// ENG: Reloads the user, because they may have been disabled since the redirect, then
+// finishes exactly like a password login: an SMS challenge for users with a phone,
+// otherwise the token.
+// LAO: ແລກລະຫັດໃຊ້ຄັ້ງດຽວເປັນການເຂົ້າສູ່ລະບົບ — ມີເບີໂທຈະສົ່ງ OTP, ບໍ່ມີຈະອອກ token.
+//
+// @param ctx - request context
+// @param code - one-time code from the frontend
+// @returns the login result, or an Unauthorized error
+func (s *AuthService) ExchangeHandoff(ctx context.Context, code string) (LoginResult, error) {
+	userID, err := s.handoffs.Redeem(ctx, code)
+	if errors.Is(err, oauth.ErrHandoffNotFound) {
+		return LoginResult{}, errHandoffInvalid
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	user, err := s.store.GetUserByID(ctx, userID)
+	if store.IsNotFound(err) || (err == nil && !user.IsActive) {
+		return LoginResult{}, errIdentityNotAllowed
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return s.complete(ctx, user)
+}
+
+// complete finishes a login once the first factor (password or Google) has passed.
+//
+// ENG: A user with a phone gets an SMS challenge; anyone else gets the token right away.
+// LAO: ຈົບການເຂົ້າສູ່ລະບົບ — ມີເບີໂທຈະເລີ່ມ OTP, ບໍ່ມີຈະອອກ token.
+//
+// @param ctx - request context
+// @param user - user who passed the first factor
+// @returns a token result or an OTP challenge result, or an error
+func (s *AuthService) complete(ctx context.Context, user db.User) (LoginResult, error) {
+	if user.Phone != nil {
+		ch, err := s.otp.Start(ctx, otp.Subject{UserID: user.ID, Email: user.Email}, *user.Phone)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		return LoginResult{User: user, Challenge: &ch}, nil
+	}
+	return s.issue(ctx, user)
 }
 
 // issue signs an access token and publishes the user's session.

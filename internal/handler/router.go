@@ -16,14 +16,17 @@ import (
 )
 
 type Services struct {
-	Auth  *service.AuthService
-	Users *service.UserService
+	Auth   *service.AuthService
+	Users  *service.UserService
+	Google GoogleLogin
 }
 
 type RouterOptions struct {
 	TrustProxy         bool
 	EnableDocs         bool
 	CORSAllowedOrigins []string
+	OAuthFrontendURL   string
+	SecureCookies      bool
 }
 
 type Pinger interface {
@@ -46,6 +49,7 @@ type HealthCheck struct {
 // ENG: Keeps the same /api/v1 paths mart-api used to serve, so the gateway can route
 // by prefix and clients do not change. The login endpoints are public but rate
 // limited per IP; /auth/me and /auth/logout need a token; /users is admin only.
+// The Google login routes are only mounted when svc.Google is set.
 // LAO: ສ້າງ router — ເສັ້ນທາງ login ເປີດສາທາລະນະແຕ່ຈຳກັດຈຳນວນ, /users ສະເພາະ admin.
 //
 // @param logger - logger for request logs and panics
@@ -87,6 +91,13 @@ func NewRouter(logger *slog.Logger, tokens *token.Manager, users mw.UserLookup, 
 		r.With(mw.RateLimit(5, time.Minute)).Post("/auth/login", authH.Login)
 		r.With(mw.RateLimit(10, time.Minute)).Post("/auth/login/verify", authH.VerifyOTP)
 		r.With(mw.RateLimit(5, time.Minute)).Post("/auth/login/resend", authH.ResendOTP)
+
+		if svc.Google != nil {
+			googleH := &GoogleHandler{google: svc.Google, auth: svc.Auth, frontendURL: opts.OAuthFrontendURL, secure: opts.SecureCookies}
+			r.With(mw.RateLimit(10, time.Minute)).Get("/auth/google/login", googleH.Login)
+			r.With(mw.RateLimit(10, time.Minute)).Get("/auth/google/callback", googleH.Callback)
+			r.With(mw.RateLimit(10, time.Minute)).Post("/auth/google/exchange", googleH.Exchange)
+		}
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(tokens, users))

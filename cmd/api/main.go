@@ -12,6 +12,7 @@ import (
 
 	"github.com/TonnPcst/martgo-auth/internal/config"
 	"github.com/TonnPcst/martgo-auth/internal/handler"
+	"github.com/TonnPcst/martgo-auth/internal/oauth"
 	"github.com/TonnPcst/martgo-auth/internal/otp"
 	"github.com/TonnPcst/martgo-auth/internal/service"
 	"github.com/TonnPcst/martgo-auth/internal/session"
@@ -98,8 +99,23 @@ func run() error {
 	st := store.New(pool)
 	sessions := session.NewWriter(rdb, tokens.TTL())
 	services := handler.Services{
-		Auth:  service.NewAuthService(st, tokens, sessions, otps),
+		Auth:  service.NewAuthService(st, tokens, sessions, otps, oauth.NewHandoffs(rdb)),
 		Users: service.NewUserService(st, sessions),
+	}
+
+	if cfg.GoogleEnabled() {
+		discoverCtx, cancelDiscover := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelDiscover()
+		google, err := oauth.NewGoogle(discoverCtx, rdb, oauth.GoogleConfig{
+			ClientID:      cfg.GoogleClientID,
+			ClientSecret:  cfg.GoogleClientSecret,
+			RedirectURL:   cfg.GoogleRedirectURL,
+			AllowedDomain: cfg.GoogleAllowedDomain,
+		})
+		if err != nil {
+			return err
+		}
+		services.Google = google
 	}
 
 	checks := []handler.HealthCheck{
@@ -110,6 +126,8 @@ func run() error {
 		TrustProxy:         cfg.TrustProxy,
 		EnableDocs:         cfg.EnableDocs,
 		CORSAllowedOrigins: cfg.CORSAllowedOrigins,
+		OAuthFrontendURL:   cfg.OAuthFrontendURL,
+		SecureCookies:      cfg.Env == "production",
 	})
 
 	srv := &http.Server{

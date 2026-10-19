@@ -64,17 +64,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		httpx.HandleError(w, r, err)
 		return
 	}
-	if res.Challenge != nil {
-		httpx.JSON(w, http.StatusAccepted, otpChallengeResponse{
-			OTPRequired: true,
-			ChallengeID: res.Challenge.ID,
-			PhoneHint:   maskPhone(*res.User.Phone),
-			ExpiresAt:   res.Challenge.ExpiresAt,
-			ResendAt:    res.Challenge.ResendAt,
-		})
-		return
-	}
-	writeLogin(w, res)
+	writeLoginResult(w, res)
 }
 
 // VerifyOTP finishes an SMS login. POST /api/v1/auth/login/verify (10 requests/min per IP)
@@ -155,6 +145,28 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeLoginResult writes the answer of a first login step.
+//
+// ENG: 202 with the SMS challenge when the user has a phone, otherwise 200 with the token.
+// Shared by the password login and the Google exchange.
+// LAO: ຕອບຜົນການເຂົ້າສູ່ລະບົບ — ມີເບີໂທຕອບ 202 ພ້ອມ OTP challenge, ບໍ່ມີຕອບ 200 ພ້ອມ token.
+//
+// @param w - response writer
+// @param res - login result
+func writeLoginResult(w http.ResponseWriter, res service.LoginResult) {
+	if res.Challenge != nil {
+		httpx.JSON(w, http.StatusAccepted, otpChallengeResponse{
+			OTPRequired: true,
+			ChallengeID: res.Challenge.ID,
+			PhoneHint:   maskPhone(*res.User.Phone),
+			ExpiresAt:   res.Challenge.ExpiresAt,
+			ResendAt:    res.Challenge.ResendAt,
+		})
+		return
+	}
+	writeLogin(w, res)
 }
 
 // writeLogin writes a successful login response.

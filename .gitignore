@@ -4,3 +4,4 @@ bin/
 .DS_Store
 .go/
 keys/
+client_secret_*.json
